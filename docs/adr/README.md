@@ -12,3 +12,4 @@ that weren't copied are plain text. From 0066 on, they're decided here.
 | [0064](0064-receipts-kitty-web-with-wallets.md) | Receipts and Kitty: a React web with wallets is the main surface, Telegram is optional |
 | [0065](0065-split-receipts-and-kitty-repos.md) | Split Receipts and Kitty into their own public repos |
 | [0066](0066-remora-design-system.md) | Kitty's web uses Remora's design system |
+| [0067](0067-agent-delegates.md) | Agents with a mandate: onchain delegates with an approval cap (pot version 2), a stdio MCP server that holds the agent key, a read-only remote MCP, and the repo's own testnet sponsor |

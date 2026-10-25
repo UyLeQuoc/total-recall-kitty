@@ -14,6 +14,10 @@
 /// Permit guards: `internal::permit<KITTY>()` is minted only in `join` (the proposal's funder is the
 /// sender), `contribute` (the native module checks the spender, the pot checks membership) and never
 /// elsewhere.
+///
+/// Delegates (KT4, version 2, ADR-0067): a member may name one agent that proposes spends and approves
+/// them for that member, up to a cap. Above the cap, or for rules and closing, the member decides.
+/// Delegates live in dynamic fields on the pot, since an upgrade can't change `Pot`'s layout.
 module kitty::pot;
 
 use std::internal;
@@ -21,13 +25,14 @@ use std::string::String;
 use sui::allowance::{Self, Allowance, AllowanceCap, AllowanceProposal, AllowanceWithdrawal};
 use sui::balance::{Self, Balance};
 use sui::clock::Clock;
+use sui::dynamic_field as df;
 use sui::event;
 use sui::table::{Self, Table};
 use sui::vec_map::{Self, VecMap};
 use sui::vec_set::{Self, VecSet};
 
 /// Bumped on every upgrade that changes object semantics; pots migrate forward with `migrate`.
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
 const MAX_MEMBERS: u64 = 20;
 
 #[error(code = 1)]
@@ -66,6 +71,12 @@ const EZeroAmount: vector<u8> = "Amount must be greater than zero";
 const EWrongVersion: vector<u8> = "Object version doesn't match the package; migrate it";
 #[error(code = 18)]
 const ENotUpgrade: vector<u8> = "Object is already at the current version";
+#[error(code = 19)]
+const EOverDelegateCap: vector<u8> = "Above this agent's cap: the member approves it themselves";
+#[error(code = 20)]
+const ENotDelegate: vector<u8> = "Only the member's current delegate can do this";
+#[error(code = 21)]
+const EDelegateSpendOnly: vector<u8> = "A delegate acts on spends only, never on rules or closing";
 
 /// The app type allowances are bound to. Never instantiated: only its permit is minted, here.
 public struct KITTY has drop {}
@@ -109,6 +120,12 @@ public struct Pot<phantom C> has key {
     version: u64,
 }
 
+/// The dynamic-field key of a member's delegate on the pot (version 2).
+public struct DelegateKey has copy, drop, store { member: address }
+
+/// An agent that proposes and approves spends for one member, up to `approve_cap`.
+public struct Delegate has drop, store { agent: address, approve_cap: u64 }
+
 // === Events ===
 
 public struct PotCreated has copy, drop {
@@ -145,6 +162,28 @@ public struct Left has copy, drop { pot: ID, member: address }
 public struct Refunded has copy, drop { pot: ID, member: address, amount: u64 }
 
 public struct Closed has copy, drop { pot: ID, refunded: u64, total_in: u64, total_out: u64 }
+
+public struct DelegateSet has copy, drop { pot: ID, member: address, agent: address, approve_cap: u64 }
+
+public struct DelegateRevoked has copy, drop { pot: ID, member: address, agent: address }
+
+/// `approved`: the spend was within the cap, so it carries the member's approval.
+public struct DelegateProposed has copy, drop {
+    pot: ID,
+    proposal: u64,
+    member: address,
+    agent: address,
+    amount: u64,
+    approved: bool,
+}
+
+public struct DelegateApproved has copy, drop {
+    pot: ID,
+    proposal: u64,
+    member: address,
+    agent: address,
+    approvals: u64,
+}
 
 // === Create and join ===
 
@@ -264,6 +303,10 @@ public fun approve<C>(pot: &mut Pot<C>, id: u64, ctx: &mut TxContext) {
 public fun execute<C>(pot: &mut Pot<C>, id: u64, ctx: &mut TxContext) {
     pot.assert_open();
     pot.assert_active(ctx.sender());
+    pot.execute_inner(id);
+}
+
+fun execute_inner<C>(pot: &mut Pot<C>, id: u64) {
     assert!(pot.proposals.contains(id), ENoProposal);
     let needed = pot.quorum.min(pot.active_count());
     let have = pot.active_approvals(id);
@@ -310,6 +353,7 @@ public fun leave<C>(
     pot.assert_allowance(member, &allowance);
     allowance::revoke(cap, allowance);
     pot.members.get_mut(&member).active = false;
+    pot.drop_delegate(member);
     event::emit(Left { pot: object::id(pot), member });
 }
 
@@ -318,6 +362,86 @@ public fun close_after_deadline<C>(pot: &mut Pot<C>, clock: &Clock) {
     pot.assert_open();
     assert!(clock.timestamp_ms() >= pot.deadline_ms, ETooEarly);
     pot.close_and_refund();
+}
+
+// === Delegates (version 2) ===
+
+/// Member: names `agent` to propose spends and approve them for this member, up to `approve_cap`.
+/// Replaces an earlier delegate.
+public fun set_delegate<C>(pot: &mut Pot<C>, agent: address, approve_cap: u64, ctx: &mut TxContext) {
+    pot.assert_open();
+    let member = ctx.sender();
+    pot.assert_active(member);
+    pot.drop_delegate(member);
+    df::add(&mut pot.id, DelegateKey { member }, Delegate { agent, approve_cap });
+    event::emit(DelegateSet { pot: object::id(pot), member, agent, approve_cap });
+}
+
+/// Member: removes their delegate. From then on the agent's calls abort.
+public fun revoke_delegate<C>(pot: &mut Pot<C>, ctx: &mut TxContext) {
+    pot.assert_version();
+    let member = ctx.sender();
+    assert!(df::exists(&pot.id, DelegateKey { member }), ENotDelegate);
+    pot.drop_delegate(member);
+}
+
+/// The member's delegate: proposes a spend for the member. Within the cap it carries the member's
+/// approval, as a member's own proposal does; above it, it waits for the member.
+public fun propose_as_delegate<C>(
+    pot: &mut Pot<C>,
+    member: address,
+    payee: address,
+    amount: u64,
+    memo: String,
+    ctx: &mut TxContext,
+): u64 {
+    pot.assert_open();
+    assert!(amount > 0, EZeroAmount);
+    let agent = ctx.sender();
+    let cap = pot.delegate_cap(member, agent);
+    let approved = amount <= cap;
+    let id = pot.next_proposal;
+    pot.next_proposal = id + 1;
+    let action = Action::Spend { payee, amount, memo };
+    let approvals = if (approved) vec_set::singleton(member) else vec_set::empty();
+    pot.proposals.add(id, Proposal { action, proposer: member, approvals, executed: false });
+    let pot_id = object::id(pot);
+    event::emit(Proposed { pot: pot_id, proposal: id, proposer: member, action });
+    event::emit(DelegateProposed { pot: pot_id, proposal: id, member, agent, amount, approved });
+    id
+}
+
+/// The member's delegate: approves a spend for the member, up to the delegate's cap.
+public fun approve_as_delegate<C>(pot: &mut Pot<C>, member: address, id: u64, ctx: &mut TxContext) {
+    pot.assert_open();
+    let agent = ctx.sender();
+    let cap = pot.delegate_cap(member, agent);
+    assert!(pot.proposals.contains(id), ENoProposal);
+    let p = pot.proposals.borrow_mut(id);
+    assert!(!p.executed, EExecuted);
+    let amount = match (&p.action) {
+        Action::Spend { amount, .. } => *amount,
+        _ => abort EDelegateSpendOnly,
+    };
+    assert!(amount <= cap, EOverDelegateCap);
+    assert!(!p.approvals.contains(&member), EAlreadyApproved);
+    p.approvals.insert(member);
+    let approvals = p.approvals.length();
+    let pot_id = object::id(pot);
+    event::emit(Approved { pot: pot_id, proposal: id, member, approvals });
+    event::emit(DelegateApproved { pot: pot_id, proposal: id, member, agent, approvals });
+}
+
+/// The member's delegate, once a spend has its quorum: runs it, like `execute`.
+public fun execute_as_delegate<C>(pot: &mut Pot<C>, member: address, id: u64, ctx: &mut TxContext) {
+    pot.assert_open();
+    let _cap = pot.delegate_cap(member, ctx.sender());
+    assert!(pot.proposals.contains(id), ENoProposal);
+    match (&pot.proposals.borrow(id).action) {
+        Action::Spend { .. } => {},
+        _ => abort EDelegateSpendOnly,
+    };
+    pot.execute_inner(id);
 }
 
 // === Upgrades ===
@@ -359,6 +483,21 @@ public fun contributed<C>(pot: &Pot<C>, member: address): u64 {
 }
 
 public fun approvals<C>(pot: &Pot<C>, id: u64): u64 { pot.active_approvals(id) }
+
+/// The member's delegate and its cap, if any.
+public fun delegate<C>(pot: &Pot<C>, member: address): Option<address> {
+    if (df::exists(&pot.id, DelegateKey { member })) {
+        let d: &Delegate = df::borrow(&pot.id, DelegateKey { member });
+        option::some(d.agent)
+    } else option::none()
+}
+
+public fun delegate_approve_cap<C>(pot: &Pot<C>, member: address): u64 {
+    if (df::exists(&pot.id, DelegateKey { member })) {
+        let d: &Delegate = df::borrow(&pot.id, DelegateKey { member });
+        d.approve_cap
+    } else 0
+}
 
 // === Internal ===
 
@@ -419,6 +558,22 @@ fun active_approvals<C>(pot: &Pot<C>, id: u64): u64 {
     let mut n = 0;
     p.approvals.keys().do_ref!(|a| if (pot.is_active(*a)) n = n + 1);
     n
+}
+
+/// `agent` is `member`'s current delegate, and the member is still in the pot: the agent's cap.
+fun delegate_cap<C>(pot: &Pot<C>, member: address, agent: address): u64 {
+    pot.assert_active(member);
+    assert!(df::exists(&pot.id, DelegateKey { member }), ENotDelegate);
+    let d: &Delegate = df::borrow(&pot.id, DelegateKey { member });
+    assert!(d.agent == agent, ENotDelegate);
+    d.approve_cap
+}
+
+fun drop_delegate<C>(pot: &mut Pot<C>, member: address) {
+    if (df::exists(&pot.id, DelegateKey { member })) {
+        let old: Delegate = df::remove(&mut pot.id, DelegateKey { member });
+        event::emit(DelegateRevoked { pot: object::id(pot), member, agent: old.agent });
+    };
 }
 
 fun assert_version<C>(pot: &Pot<C>) {
