@@ -1,7 +1,17 @@
 #[test_only]
 module kitty::pot_tests;
 
-use kitty::pot::{Self, KITTY, Pot, Contributed, Spent, Refunded};
+use kitty::pot::{
+    Self,
+    KITTY,
+    Pot,
+    Contributed,
+    Spent,
+    Refunded,
+    DelegateApproved,
+    DelegateProposed,
+    DelegateRevoked,
+};
 use sui::allowance::{Self, Allowance, AllowanceCap};
 use sui::balance::{Self, Balance};
 use sui::clock::{Self, Clock};
@@ -16,6 +26,8 @@ const C: address = @0xC;
 const KEEPER: address = @0xEE;
 const PAYEE: address = @0xF0;
 const STRANGER: address = @0x99;
+const AGENT: address = @0xA6;
+const AGENT_CAP: u64 = 100;
 
 const FUNDS: u64 = 10_000;
 const PER_HOUR: u256 = 500;
@@ -357,8 +369,196 @@ fun migrate_moves_an_old_pot_forward() {
     with_pot!(&mut scenario, A, |p, _ctx| {
         p.set_version_for_testing(0);
         p.migrate();
-        assert!(p.version() == 1);
+        assert!(p.version() == 2);
     });
     pull(&mut scenario, &clock, alws[0], A, 10);
+    finish(scenario, clock);
+}
+
+// === Delegates (version 2) ===
+
+/// `funded()`, and B names AGENT with a cap of 100.
+fun delegated(): (Scenario, Clock, vector<ID>) {
+    let (mut scenario, clock, alws) = funded();
+    with_pot!(&mut scenario, B, |p, ctx| p.set_delegate(AGENT, AGENT_CAP, ctx));
+    (scenario, clock, alws)
+}
+
+fun leave_as(scenario: &mut Scenario, member: address, allowance_id: ID) {
+    scenario.next_tx(member);
+    let mut p = scenario.take_shared<Pot<TEST>>();
+    let cap = scenario.take_from_sender<AllowanceCap<Balance<TEST>>>();
+    let alw = scenario.take_shared_by_id<Allowance<Balance<TEST>>>(allowance_id);
+    p.leave(cap, alw, scenario.ctx());
+    ts::return_shared(p);
+}
+
+#[test]
+fun a_delegate_approves_within_its_cap_and_executes() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    assert!(event::events_by_type<DelegateApproved>().length() == 1);
+    with_pot!(&mut scenario, AGENT, |p, ctx| {
+        assert!(p.approvals(0) == 2);
+        p.execute_as_delegate(B, 0, ctx);
+    });
+    assert!(event::events_by_type<Spent>().length() == 1);
+    assert!(settled(&mut scenario, PAYEE) == 50);
+    with_pot!(&mut scenario, A, |p, _ctx| {
+        assert!(p.delegate(B) == option::some(AGENT));
+        assert!(p.delegate_approve_cap(B) == AGENT_CAP);
+    });
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EOverDelegateCap)]
+fun a_delegate_approval_above_its_cap_aborts() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 200, b"hotel".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test]
+fun the_member_approves_what_their_agent_cannot() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 200, b"hotel".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, B, |p, ctx| p.approve(0, ctx));
+    with_pot!(&mut scenario, B, |p, ctx| p.execute(0, ctx));
+    assert!(settled(&mut scenario, PAYEE) == 200);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotDelegate)]
+fun a_revoked_delegate_cannot_approve() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, B, |p, ctx| p.revoke_delegate(ctx));
+    assert!(event::events_by_type<DelegateRevoked>().length() == 1);
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotDelegate)]
+fun an_agent_nobody_named_cannot_approve() {
+    let (mut scenario, clock, _alws) = funded();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, STRANGER, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotDelegate)]
+fun a_replaced_delegate_cannot_approve() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, B, |p, ctx| p.set_delegate(STRANGER, AGENT_CAP, ctx));
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EDelegateSpendOnly)]
+fun a_delegate_cannot_approve_a_rule_change() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_auto_ok_cap(50, ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EDelegateSpendOnly)]
+fun a_delegate_cannot_execute_a_close() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_close(ctx);
+    });
+    with_pot!(&mut scenario, C, |p, ctx| p.approve(0, ctx));
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.execute_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotMember)]
+fun the_delegate_of_a_member_who_left_cannot_act() {
+    let (mut scenario, clock, alws) = delegated();
+    leave_as(&mut scenario, B, alws[1]);
+    with_pot!(&mut scenario, A, |p, _ctx| assert!(p.delegate(B).is_none()));
+    with_pot!(&mut scenario, A, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test]
+fun a_delegate_proposal_within_its_cap_carries_the_members_approval() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, AGENT, |p, ctx| {
+        p.propose_as_delegate(B, PAYEE, 60, b"taxi".to_string(), ctx);
+        assert!(p.approvals(0) == 1);
+    });
+    assert!(event::events_by_type<DelegateProposed>().length() == 1);
+    with_pot!(&mut scenario, C, |p, ctx| p.approve(0, ctx));
+    with_pot!(&mut scenario, C, |p, ctx| p.execute(0, ctx));
+    assert!(settled(&mut scenario, PAYEE) == 60);
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EUnderQuorum)]
+fun a_delegate_proposal_above_its_cap_waits_for_the_member() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, AGENT, |p, ctx| {
+        p.propose_as_delegate(B, PAYEE, 300, b"hotel".to_string(), ctx);
+        assert!(p.approvals(0) == 0);
+    });
+    with_pot!(&mut scenario, C, |p, ctx| p.approve(0, ctx));
+    // One approval of two: the agent couldn't approve for B, so it doesn't pass.
+    with_pot!(&mut scenario, C, |p, ctx| p.execute(0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EAlreadyApproved)]
+fun a_delegate_cannot_approve_twice_for_its_member() {
+    let (mut scenario, clock, _alws) = delegated();
+    with_pot!(&mut scenario, B, |p, ctx| {
+        p.propose_spend(PAYEE, 50, b"food".to_string(), ctx);
+    });
+    with_pot!(&mut scenario, AGENT, |p, ctx| p.approve_as_delegate(B, 0, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotMember)]
+fun only_a_member_names_a_delegate() {
+    let (mut scenario, clock, _alws) = funded();
+    with_pot!(&mut scenario, STRANGER, |p, ctx| p.set_delegate(AGENT, AGENT_CAP, ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::ENotDelegate)]
+fun revoking_without_a_delegate_aborts() {
+    let (mut scenario, clock, _alws) = funded();
+    with_pot!(&mut scenario, B, |p, ctx| p.revoke_delegate(ctx));
+    finish(scenario, clock);
+}
+
+#[test, expected_failure(abort_code = pot::EWrongVersion)]
+fun a_version_1_pot_must_migrate_before_delegates() {
+    let (mut scenario, clock, _alws) = funded();
+    with_pot!(&mut scenario, B, |p, ctx| {
+        p.set_version_for_testing(1);
+        p.set_delegate(AGENT, AGENT_CAP, ctx);
+    });
     finish(scenario, clock);
 }
