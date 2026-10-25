@@ -85,7 +85,7 @@ export async function installTestWallet(
 
 /** Connects through dapp-kit's own button and modal. */
 export async function connect(page: Page, name: string) {
-  await page.getByRole("button", { name: "Connect wallet" }).click();
+  await page.getByRole("button", { name: "Connect wallet", exact: true }).first().click();
   await page.getByRole("button", { name }).click();
   await page.getByRole("dialog").waitFor({ state: "detached", timeout: 30_000 });
 }

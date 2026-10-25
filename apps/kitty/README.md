@@ -39,9 +39,11 @@ Track 3 (Consumer Finance Apps). Split out of the Remora monorepo ([ADR-0065](..
    - Leaving revokes the allowance, so no more pulls; what you put in stays.
    - Closing (by vote, or by anyone after the deadline) refunds pro rata.
 
-## The web (ADR-0064)
+## The web (ADR-0064, ADR-0066)
 The web is the main surface; Telegram is optional. Members sign with **their own wallet** (dapp-kit on
-testnet), and Kitty pays the gas.
+testnet), and Kitty pays the gas. It uses Remora's design system (ADR-0066): its tokens, its shadcn kit
+and its app shell, with a sidebar (a sheet on a phone), light and dark themes, and a "Connect wallet"
+dialog.
 - **Home:** the pots, "Start a pot" (the wallet creates it), and a "Get ready" card. Kitty pulls from the
   wallet's USDC **address balance**, so the card offers to move USDC coins there (one sponsored
   signature), or points to [Circle's testnet faucet](https://faucet.circle.com).
@@ -100,6 +102,8 @@ bun run dev:web                                  # the web on http://localhost:5
   wallet), and runs: start a pot, two joins, a keeper pull, a proposal, the approval that pays it, a
   coin moved into a balance from the "Get ready" card, and a leave. The digests go to
   `test-results/kitty-e2e.json`, with screenshots. It's not part of `bun run test`.
+  `e2e/screens.e2e.ts` runs with it and spends nothing: Home and a pot page, light and dark, at 1280 and
+  375 px, into `test-results/screens/`.
 - **Publish** (testnet, already done): `bun --env-file=../../.env scripts/publish.ts`.
 - **Exit:** `bun --env-file=../../.env scripts/exit.ts`. It runs the keeper, the stream and the API in
   one process, with the test members' keys.

@@ -7,7 +7,7 @@
       "!memwal",
       "!**/dist",
       "!**/node_modules",
-      "!apps/web/src/components/ui",
+      "!apps/kitty/web/src/components/ui",
       "!apps/web/public",
       "!**/*.css"
     ]

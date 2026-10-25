@@ -208,7 +208,11 @@ export function useSponsored() {
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  async function run<T extends { digest: string }>(body: Prepare): Promise<T | null> {
+  /** `throws` is for a confirm dialog that shows the error itself (ConfirmAction). */
+  async function run<T extends { digest: string }>(
+    body: Prepare,
+    opts?: { throws?: boolean },
+  ): Promise<T | null> {
     if (!account) {
       setError("Connect a wallet first.");
       return null;
@@ -231,7 +235,9 @@ export function useSponsored() {
       await qc.invalidateQueries();
       return result;
     } catch (err) {
-      setError(readable(err));
+      const message = readable(err);
+      setError(message);
+      if (opts?.throws) throw new Error(message);
       return null;
     } finally {
       setStep("idle");

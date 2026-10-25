@@ -1,8 +1,11 @@
 /** "Start a pot": the connected wallet creates it onchain (sponsored), then joins like anyone else. */
 import { type FormEvent, useState } from "react";
 import { useNavigate } from "react-router";
-import { useSponsored } from "../api.ts";
-import { Button, Card, Field, Status } from "./ui.tsx";
+import { useSponsored } from "@/api";
+import { Field, SelectField, TxStatus } from "@/components/kitty";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { NativeSelectOption } from "@/components/ui/native-select";
 
 const WINDOWS = [
   { label: "every hour", minutes: 60 },
@@ -43,88 +46,86 @@ export function StartPot({ onClose }: { onClose: () => void }) {
 
   return (
     <Card>
-      <form onSubmit={submit} className="space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Start a pot</h2>
-          <p className="text-sm text-stone-600 dark:text-stone-400">
-            The pot is a shared object on Sui. You set the goal and the rules; the contract enforces
-            them. Then you and your friends join, each with one signature.
-          </p>
-        </div>
-        <Field
-          label="Name"
-          required
-          maxLength={60}
-          placeholder="Da Lat trip"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <div className="grid grid-cols-2 gap-3">
+      <CardHeader>
+        <CardTitle>Start a pot</CardTitle>
+        <CardDescription>
+          The pot is a shared object on Sui. You set the goal and the rules; the contract enforces
+          them. Then you and your friends join, each with one signature.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={submit} className="flex max-w-2xl flex-col gap-4">
           <Field
-            label="Goal ($)"
-            type="number"
-            inputMode="decimal"
-            min="0.01"
-            step="0.01"
+            label="Name"
             required
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
+            maxLength={60}
+            placeholder="Da Lat trip"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
           />
-          <Field
-            label="By"
-            type="datetime-local"
-            required
-            value={deadline}
-            onChange={(e) => setDeadline(e.target.value)}
-          />
-          <Field
-            label="Approvals to spend"
-            type="number"
-            min="1"
-            max="50"
-            step="1"
-            required
-            value={quorum}
-            onChange={(e) => setQuorum(e.target.value)}
-            hint="The quorum: how many members approve a spend or a rule change."
-          />
-          <Field
-            label="Auto-ok up to ($)"
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="0.01"
-            value={autoOk}
-            onChange={(e) => setAutoOk(e.target.value)}
-            hint="Spends this small need no vote. 0 = every spend is voted."
-          />
-        </div>
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-stone-700 dark:text-stone-300">
-            Kitty pulls each share
-          </span>
-          <select
-            className="min-h-10 rounded-xl border border-stone-300 bg-white px-3 py-2 text-base sm:text-sm dark:border-stone-700 dark:bg-stone-950"
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Goal ($)"
+              type="number"
+              inputMode="decimal"
+              min="0.01"
+              step="0.01"
+              required
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+            />
+            <Field
+              label="By"
+              type="datetime-local"
+              required
+              value={deadline}
+              onChange={(e) => setDeadline(e.target.value)}
+            />
+            <Field
+              label="Approvals to spend"
+              type="number"
+              min="1"
+              max="50"
+              step="1"
+              required
+              value={quorum}
+              onChange={(e) => setQuorum(e.target.value)}
+              hint="The quorum: how many members approve a spend or a rule change."
+            />
+            <Field
+              label="Auto-ok up to ($)"
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.01"
+              value={autoOk}
+              onChange={(e) => setAutoOk(e.target.value)}
+              hint="Spends this small need no vote. 0 means every spend is voted."
+            />
+          </div>
+          <SelectField
+            label="Kitty pulls each share"
+            className="w-full"
             value={windowMinutes}
             onChange={(e) => setWindowMinutes(Number(e.target.value))}
           >
             {WINDOWS.map((w) => (
-              <option key={w.minutes} value={w.minutes}>
+              <NativeSelectOption key={w.minutes} value={w.minutes}>
                 at most once per window, {w.label}
-              </option>
+              </NativeSelectOption>
             ))}
-          </select>
-        </label>
-        <Status step={tx.step} error={tx.error} />
-        <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={tx.busy || !name.trim()}>
-            Create the pot
-          </Button>
-          <Button variant="ghost" onClick={onClose} disabled={tx.busy}>
-            Cancel
-          </Button>
-        </div>
-      </form>
+          </SelectField>
+          <TxStatus step={tx.step} error={tx.error} />
+          <div className="flex flex-wrap gap-2">
+            <Button type="submit" disabled={tx.busy || !name.trim()}>
+              Create the pot
+            </Button>
+            <Button type="button" variant="outline" onClick={onClose} disabled={tx.busy}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      </CardContent>
     </Card>
   );
 }

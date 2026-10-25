@@ -3,11 +3,15 @@
  * with one sponsored signature; an empty wallet gets the faucet.
  */
 import { useCurrentAccount } from "@mysten/dapp-kit";
+import { ArrowUpRight } from "lucide-react";
 import { useState } from "react";
-import { Link } from "react-router";
-import { useSponsored, useWallet } from "../api.ts";
-import { FAUCET, short, usd } from "../format.ts";
-import { Badge, Button, Card, Status, TxLink } from "./ui.tsx";
+import { useSponsored, useWallet } from "@/api";
+import { Done, TxStatus } from "@/components/kitty";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { FAUCET, short, usd } from "@/format";
 
 export function WalletCard() {
   const account = useCurrentAccount();
@@ -20,80 +24,71 @@ export function WalletCard() {
   const inCoins = Number(w?.usdc.coinBalance ?? 0);
 
   return (
-    <Card tone="brand">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-semibold">
-          Your wallet{" "}
-          <span className="font-mono text-sm font-normal">{short(account.address)}</span>
-        </h2>
-        {w?.test ? <Badge tone="test">test key</Badge> : null}
-      </div>
-      {wallet.isLoading ? (
-        <p className="mt-2 text-sm text-stone-500">Reading your USDC…</p>
-      ) : (
-        <div className="mt-2 space-y-2 text-sm">
-          <p>
-            Kitty can pull from <strong>{usd(inBalance)}</strong> of test USDC in your balance.
-          </p>
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center gap-2">
+          Your wallet
+          <span className="font-mono text-sm font-normal text-muted-foreground">
+            {short(account.address)}
+          </span>
+          {w?.test ? <Badge variant="secondary">test key</Badge> : null}
+        </CardTitle>
+        <CardDescription>
+          {wallet.isLoading ? (
+            <Skeleton className="h-4 w-56" />
+          ) : (
+            <>
+              Kitty can pull from{" "}
+              <span className="font-semibold text-foreground tabular-nums">{usd(inBalance)}</span>{" "}
+              of test USDC in your balance.
+            </>
+          )}
+        </CardDescription>
+      </CardHeader>
+      {wallet.isLoading ? null : (
+        <CardContent className="flex flex-col gap-3 text-sm">
           {inCoins > 0 ? (
-            <div className="space-y-2">
+            <>
               <p>
-                You also hold <strong>{usd(inCoins)}</strong> in USDC coins. Kitty pulls only from
-                your balance, so move them there first: one signature, gas on Kitty.
+                You also hold <strong className="tabular-nums">{usd(inCoins)}</strong> in USDC
+                coins. Kitty pulls only from your balance, so move them there first: one signature,
+                gas on Kitty.
               </p>
-              <Button
-                disabled={deposit.busy}
-                onClick={async () => {
-                  const r = await deposit.run<{ digest: string; coins: number }>({
-                    action: "deposit",
-                  });
-                  if (r) {
-                    setMoved(r.digest);
-                    await wallet.refetch();
-                  }
-                }}
-              >
-                Move {usd(inCoins)} to my balance
-              </Button>
-            </div>
+              <div>
+                <Button
+                  disabled={deposit.busy}
+                  onClick={async () => {
+                    const r = await deposit.run<{ digest: string; coins: number }>({
+                      action: "deposit",
+                    });
+                    if (r) {
+                      setMoved(r.digest);
+                      await wallet.refetch();
+                    }
+                  }}
+                >
+                  Move {usd(inCoins)} to my balance
+                </Button>
+              </div>
+            </>
           ) : inBalance === 0 ? (
             <p>
               No test USDC yet. Get some from{" "}
               <a
-                className="font-medium text-brand-700 underline dark:text-brand-300"
+                className="inline-flex items-center gap-0.5 font-medium text-primary underline-offset-4 hover:underline"
                 href={FAUCET}
                 target="_blank"
                 rel="noreferrer"
               >
                 Circle's faucet
+                <ArrowUpRight aria-hidden className="size-3.5" />
               </a>{" "}
               (pick Sui testnet), then come back and move it into your balance.
             </p>
           ) : null}
-          <Status step={deposit.step} error={deposit.error} />
-          {moved ? (
-            <p className="text-emerald-700 dark:text-emerald-300">
-              Moved into your balance. <TxLink digest={moved} />
-            </p>
-          ) : null}
-          {w?.pots.length ? (
-            <p>
-              Your pots:{" "}
-              {w.pots.map((p, i) => (
-                <span key={p.potId}>
-                  {i ? ", " : ""}
-                  <Link
-                    className="font-medium text-brand-700 underline dark:text-brand-300"
-                    to={`/pots/${p.potId}`}
-                  >
-                    {p.name}
-                  </Link>
-                  {p.closed ? " (closed)" : p.active ? "" : " (left)"}
-                </span>
-              ))}
-            </p>
-          ) : null}
-        </div>
+          <TxStatus step={deposit.step} error={deposit.error} />
+          {moved ? <Done digest={moved}>Moved into your balance.</Done> : null}
+        </CardContent>
       )}
     </Card>
   );

@@ -1,12 +1,22 @@
+import { Compass } from "lucide-react";
 import { Link } from "react-router";
+import { EmptyState } from "@/components/app/empty-state";
+import { Page } from "@/components/app/page";
+import { Button } from "@/components/ui/button";
 
 export function NotFound() {
   return (
-    <div className="space-y-2 py-10 text-center">
-      <h1 className="text-2xl font-bold">Nothing here</h1>
-      <Link className="text-brand-700 underline" to="/">
-        Back to the pots
-      </Link>
-    </div>
+    <Page title="Not found">
+      <EmptyState
+        icon={<Compass />}
+        title="Nothing here"
+        description="This page doesn't exist on Kitty."
+        action={
+          <Button asChild variant="outline">
+            <Link to="/">Back to the pots</Link>
+          </Button>
+        }
+      />
+    </Page>
   );
 }
