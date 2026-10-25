@@ -43,3 +43,6 @@ Split on Oct 25, 2026 out of our Remora monorepo (Track 2), at commit `7b3a66e`
 ([ADR-0065](docs/adr/0065-split-receipts-and-kitty-repos.md)). `packages/chain` and `packages/memory` are
 copies of Remora's packages, which were ported from hippo, our earlier Walrus Memory chatbot (disclosed
 prior work).
+
+## License
+[MIT](LICENSE) ([ADR-0068](docs/adr/0068-mit-license.md)). The parts copied from Remora are under the same terms.

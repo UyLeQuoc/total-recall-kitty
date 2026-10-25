@@ -1,6 +1,6 @@
 # ADR-0065: Split Receipts and Kitty into their own public repos
 
-- **Status:** Accepted
+- **Status:** Accepted; the "no license yet" point is settled by ADR-0068 (MIT)
 - **Date:** 2026-10-25
 - **Deciders:** Uy
 
