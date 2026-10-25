@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "lib": ["ES2023", "DOM"] },
-  "include": ["src", "scripts", "test", "e2e", "web/vite.config.ts"]
+  "include": ["src", "scripts", "test", "e2e", "agents", "web/vite.config.ts"]
 }

@@ -15,6 +15,10 @@ export default defineConfig({
   server: {
     port: Number(process.env.KITTY_WEB_PORT ?? 5182),
     strictPort: true,
-    proxy: { "/api": `http://localhost:${process.env.KITTY_PORT ?? 8821}` },
+    // `/mcp` too, so the MCP lines the pot page shows work against the dev web as well (ADR-0067).
+    proxy: {
+      "/api": `http://localhost:${process.env.KITTY_PORT ?? 8821}`,
+      "/mcp": `http://localhost:${process.env.KITTY_PORT ?? 8821}`,
+    },
   },
 });

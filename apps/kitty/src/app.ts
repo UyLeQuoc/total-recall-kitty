@@ -7,16 +7,20 @@
  * A built web (`web/dist`) is served from here too, under the same paths as the pages it replaced
  * (`/`, `/pots/:id`, `/pots/:id/learned`), so one process serves one URL and the bot's links still work.
  */
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
-import { normalizeSuiAddress } from "@mysten/sui/utils";
+import { normalizeSuiAddress, toBase64 } from "@mysten/sui/utils";
+import { verifyPersonalMessageSignature } from "@mysten/sui/verify";
 import { readFunds } from "@total-recall/chain";
-import { and, desc, eq, inArray, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import {
   type ActionDeps,
   ActionError,
+  agentApprove,
+  agentPropose,
   approve,
   createPot,
   depositCoins,
@@ -25,10 +29,17 @@ import {
   maybeSuggest,
   potView,
   propose,
+  reachesQuorum,
+  revokeDelegate,
+  setDelegate,
   spendAuto,
 } from "./actions.ts";
 import { BadSignature, ChainAbort, micro } from "./chain.ts";
-import { members, memories, pots, proposals, pulls } from "./db/index.ts";
+import { delegates, mcpTokens, members, memories, pots, pulls } from "./db/index.ts";
+import { MESSAGE_MAX_AGE_MS, revokeMessage, tokenMessage } from "./mcp/messages.ts";
+import { createMcpHandler, type Rpc } from "./mcp/protocol.ts";
+import { type MemoryJson, type PotJson, readTools } from "./mcp/tools.ts";
+import { ns } from "./memory.ts";
 import { createWalletSessions, WalletSessionError, type WalletSessions } from "./wallet.ts";
 
 export interface AppDeps extends ActionDeps {
@@ -55,7 +66,14 @@ export const ABORTS: Record<string, string> = {
   EFull: "The pot has the most members it can hold.",
   EZeroAmount: "The amount must be more than zero.",
   EExceedsRateLimit: "Above this member's cap for the window.",
+  EOverDelegateCap: "Above this agent's cap: the member approves it themselves.",
+  ENotDelegate: "Only the member's current agent can do this.",
+  EDelegateSpendOnly: "An agent acts on spends only, never on rules or closing.",
+  EWrongVersion: "This pot needs to migrate to the current package first.",
 };
+
+/** Remote MCP: calls per token per minute. */
+const MCP_RATE = 60;
 
 const big = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
 /** JSON with bigints as strings (USDC amounts are micro-dollars). */
@@ -107,6 +125,35 @@ const prepareBody = z.discriminatedUnion("action", [
   }),
   z.object({ action: z.literal("leave"), sender: address, potId: address }),
   z.object({ action: z.literal("deposit"), sender: address }),
+  // KT4 (ADR-0067): the member names or revokes an agent; the agent proposes and approves.
+  z.object({
+    action: z.literal("set_delegate"),
+    sender: address,
+    potId: address,
+    agent: address,
+    capUsd: z.number().positive().max(100_000),
+  }),
+  z.object({ action: z.literal("revoke_delegate"), sender: address, potId: address }),
+  z.object({
+    action: z.literal("agent_propose"),
+    sender: address,
+    potId: address,
+    member: address,
+    payee: address,
+    amountUsd: z.number().positive(),
+    memo: z.string().trim().min(1).max(80),
+    reason: z.string().trim().min(1).max(240),
+  }),
+  z.object({
+    action: z.literal("agent_approve"),
+    sender: address,
+    potId: address,
+    member: address,
+    seq: z.number().int().min(0),
+    reason: z.string().trim().min(1).max(240),
+    /** Send it even if the chain would refuse, so the refusal gets a digest. */
+    recordRefusal: z.boolean().default(false),
+  }),
 ]);
 export type PrepareBody = z.input<typeof prepareBody>;
 
@@ -272,6 +319,46 @@ export function createApp(deps: AppDeps) {
         return send(c, await start((d) => leavePot(d, b.potId, b.sender)));
       case "deposit":
         return send(c, await start((d) => depositCoins(d, b.sender)));
+      case "set_delegate":
+        return send(
+          c,
+          await start((d) =>
+            setDelegate(d, {
+              potId: b.potId,
+              member: b.sender,
+              agent: b.agent,
+              approveCap: micro(b.capUsd),
+            }),
+          ),
+        );
+      case "revoke_delegate":
+        return send(c, await start((d) => revokeDelegate(d, b.potId, b.sender)));
+      case "agent_propose":
+        return send(
+          c,
+          await start((d) =>
+            agentPropose(d, {
+              potId: b.potId,
+              member: b.member,
+              agent: b.sender,
+              payee: b.payee,
+              amount: micro(b.amountUsd),
+              memo: b.memo,
+              reason: b.reason,
+            }),
+          ),
+        );
+      case "agent_approve":
+        return send(
+          c,
+          await start((d) =>
+            agentApprove(
+              d,
+              { potId: b.potId, member: b.member, agent: b.sender, seq: b.seq, reason: b.reason },
+              b.recordRefusal,
+            ),
+          ),
+        );
     }
   });
 
@@ -401,6 +488,160 @@ export function createApp(deps: AppDeps) {
     return send(c, await leavePot(deps, c.req.param("id"), b.member));
   });
 
+  // ---------- what Kitty remembers, for people and agents (KT4, ADR-0067) ----------
+
+  app.get("/api/pots/:id/recall", async (c) => {
+    const q = c.req.query();
+    const o: { ns?: "norms" | "members"; q?: string; about?: string } = {};
+    if (q.ns === "norms" || q.ns === "members") o.ns = q.ns;
+    if (q.q) o.q = q.q.slice(0, 200);
+    if (q.about) o.about = address.parse(q.about);
+    return send(c, await recallFor(deps, c.req.param("id"), o));
+  });
+
+  // ---------- read-only remote MCP, behind tokens a member creates (ADR-0067) ----------
+
+  const signedBy = async (message: string, signature: string, who: string) => {
+    try {
+      await verifyPersonalMessageSignature(new TextEncoder().encode(message), signature, {
+        address: who,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const fresh = (at: string) => {
+    const t = Date.parse(at);
+    return Number.isFinite(t) && Math.abs(Date.now() - t) <= MESSAGE_MAX_AGE_MS;
+  };
+
+  app.get("/api/pots/:id/mcp-tokens", async (c) => {
+    const rows = await db
+      .select()
+      .from(mcpTokens)
+      .where(eq(mcpTokens.potId, c.req.param("id")))
+      .orderBy(desc(mcpTokens.createdAt));
+    return send(
+      c,
+      rows.map(({ sha256: _secret, ...r }) => r),
+    );
+  });
+
+  app.post("/api/pots/:id/mcp-tokens", async (c) => {
+    const potId = address.parse(c.req.param("id"));
+    const b = z
+      .object({
+        member: address,
+        name: z.string().trim().min(1).max(40),
+        at: z.string(),
+        signature: z.string().min(1),
+      })
+      .parse(await c.req.json());
+    const message = tokenMessage({ potId, member: b.member, name: b.name, at: b.at });
+    if (!fresh(b.at) || !(await signedBy(message, b.signature, b.member)))
+      return c.json(
+        { error: "bad_signature", message: "The wallet's signature doesn't match." },
+        401,
+      );
+    const [m] = await db
+      .select()
+      .from(members)
+      .where(and(eq(members.potId, potId), eq(members.address, b.member)));
+    if (!m?.active)
+      return c.json({ error: "not_member", message: "Only a member can do this." }, 403);
+    const token = `kitty_${toBase64(randomBytes(32)).replace(/[+/=]/g, (x) => (x === "+" ? "-" : x === "/" ? "_" : ""))}`;
+    const id = randomUUID();
+    await db.insert(mcpTokens).values({
+      id,
+      potId,
+      member: b.member,
+      name: b.name,
+      sha256: sha256(token),
+    });
+    // The only time the token is shown.
+    return send(c, { id, token, potId, name: b.name }, 201);
+  });
+
+  app.post("/api/pots/:id/mcp-tokens/:tid/revoke", async (c) => {
+    const potId = address.parse(c.req.param("id"));
+    const tokenId = c.req.param("tid");
+    const b = z
+      .object({ member: address, at: z.string(), signature: z.string().min(1) })
+      .parse(await c.req.json());
+    const message = revokeMessage({ potId, tokenId, member: b.member, at: b.at });
+    if (!fresh(b.at) || !(await signedBy(message, b.signature, b.member)))
+      return c.json(
+        { error: "bad_signature", message: "The wallet's signature doesn't match." },
+        401,
+      );
+    const [t] = await db.select().from(mcpTokens).where(eq(mcpTokens.id, tokenId));
+    if (!t || t.potId !== potId || t.member !== b.member)
+      return c.json({ error: "not_found", message: "No such token of yours." }, 404);
+    await db
+      .update(mcpTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(mcpTokens.id, tokenId), isNull(mcpTokens.revokedAt)));
+    return c.json({ revoked: tokenId });
+  });
+
+  const hits = new Map<string, number[]>();
+  app.get("/mcp", (c) =>
+    c.json({ error: "Use POST: Kitty's MCP endpoint has no event stream." }, 405),
+  );
+  app.post("/mcp", async (c) => {
+    const bearer = /^Bearer\s+(\S+)$/i.exec(c.req.header("authorization") ?? "")?.[1];
+    const [t] = bearer
+      ? await db
+          .select()
+          .from(mcpTokens)
+          .where(eq(mcpTokens.sha256, sha256(bearer)))
+      : [];
+    if (!t || t.revokedAt)
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } },
+        401,
+      );
+    const now = Date.now();
+    const recent = (hits.get(t.id) ?? []).filter((x) => now - x < 60_000);
+    if (recent.length >= MCP_RATE)
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32002, message: "Too many calls" } },
+        429,
+      );
+    hits.set(t.id, [...recent, now]);
+    await db
+      .update(mcpTokens)
+      .set({ lastUsedAt: new Date(), calls: t.calls + 1 })
+      .where(eq(mcpTokens.id, t.id));
+    const handle = createMcpHandler({
+      name: "kitty",
+      instructions: `Kitty is a group pot on Sui testnet. This token reads pot ${t.potId} only.`,
+      tools: readTools(
+        {
+          pot: async (id) => {
+            const d = await potDetail(deps, id);
+            return d ? (JSON.parse(JSON.stringify(d, big)) as PotJson) : null;
+          },
+          memories: async (id, o) =>
+            JSON.parse(JSON.stringify(await recallFor(deps, id, o), big)) as MemoryJson[],
+        },
+        { fixedPot: t.potId },
+      ),
+    });
+    const body = (await c.req.json().catch(() => null)) as Rpc | Rpc[] | null;
+    if (!body)
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
+        400,
+      );
+    const msgs = Array.isArray(body) ? body : [body];
+    const out = (await Promise.all(msgs.map(handle))).filter((x) => x !== null);
+    // Notifications and responses alone get 202, as the spec asks.
+    if (!out.length) return c.body(null, 202);
+    return c.json(Array.isArray(body) ? out : out[0]);
+  });
+
   // ---------- the built web ----------
 
   const dist = deps.webDist ? resolve(deps.webDist) : null;
@@ -443,23 +684,6 @@ function required<T>(v: T | undefined, name: string): T {
   return v;
 }
 
-/** Whether one more approval reaches the quorum `pot::execute` checks. */
-async function reachesQuorum(deps: Pick<ActionDeps, "db">, potId: string, seq: number) {
-  const [pot] = await deps.db.select().from(pots).where(eq(pots.id, potId));
-  const [p] = await deps.db
-    .select()
-    .from(proposals)
-    .where(and(eq(proposals.potId, potId), eq(proposals.seq, seq)));
-  if (!pot || !p) throw new ActionError("not_found", "No such proposal.");
-  const active = new Set(
-    (await deps.db.select().from(members).where(eq(members.potId, potId)))
-      .filter((m) => m.active)
-      .map((m) => m.address),
-  );
-  const have = p.approvals.filter((a) => active.has(a.member)).length;
-  return have + 1 >= Math.min(pot.quorum, active.size);
-}
-
 /** Everything the pot page shows, with each 🧠 reason resolved to its memory and blob. */
 export async function potDetail(
   deps: Pick<ActionDeps, "db" | "chain" | "memory" | "log">,
@@ -486,9 +710,34 @@ export async function potDetail(
     : [];
   const memo = new Map(rows.map((r) => [r.id, { id: r.id, text: r.text, blobId: r.blobId }]));
   const at = (id: string | null | undefined) => (id ? (memo.get(id) ?? null) : null);
+  const ds = await deps.db
+    .select()
+    .from(delegates)
+    .where(and(eq(delegates.potId, potId), eq(delegates.active, true)))
+    .orderBy(desc(delegates.createdAt));
+  const dmem = ds.length
+    ? await deps.db
+        .select()
+        .from(memories)
+        .where(
+          inArray(
+            memories.id,
+            ds.map((d) => d.memoryId).filter((x): x is string => !!x),
+          ),
+        )
+    : [];
+  for (const r of dmem) memo.set(r.id, { id: r.id, text: r.text, blobId: r.blobId });
   return {
     pot: v.pot,
     onchain: v.onchain,
+    delegates: ds.map((d) => ({
+      member: d.member,
+      agent: d.agent,
+      approveCap: d.approveCap,
+      setDigest: d.setDigest,
+      createdAt: d.createdAt,
+      reason: at(d.memoryId),
+    })),
     totalIn: v.members.reduce((s, m) => s + m.contributed, 0n),
     members: v.members.map((m) => ({
       address: m.address,
@@ -514,4 +763,46 @@ export async function potMemories(deps: Pick<ActionDeps, "db">, potId: string) {
     .where(like(memories.namespace, `kitty:pot:${potId}:%`))
     .orderBy(desc(memories.createdAt))
     .limit(200);
+}
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+/**
+ * The pot's memories, newest first, from Kitty's index (each with its blob once stored). `q` asks the
+ * relayer when memory is on and a namespace is given; `about` keeps the lines about one member.
+ */
+export async function recallFor(
+  deps: Pick<ActionDeps, "db" | "memory" | "log">,
+  potId: string,
+  o: { ns?: "norms" | "members"; q?: string; about?: string },
+) {
+  const prefix = o.ns ? ns[o.ns](potId) : `kitty:pot:${potId}:`;
+  let rows = (
+    await deps.db
+      .select()
+      .from(memories)
+      .where(o.ns ? eq(memories.namespace, prefix) : like(memories.namespace, `${prefix}%`))
+      .orderBy(desc(memories.createdAt))
+      .limit(200)
+  ).filter((r) => r.text);
+  if (o.about) {
+    const a = normalizeSuiAddress(o.about);
+    rows = rows.filter((r) => r.text.includes(a));
+  }
+  if (o.q) {
+    const q = o.q.toLowerCase();
+    if (deps.memory && o.ns) {
+      const found = await deps.memory.recall(prefix, o.q, 10).catch((err) => {
+        deps.log?.("recall.failed", { error: String(err) });
+        return [];
+      });
+      const byBlob = new Map(rows.filter((r) => r.blobId).map((r) => [r.blobId, r]));
+      const hit = found
+        .map((f) => byBlob.get(f.blobId))
+        .filter((r): r is (typeof rows)[number] => !!r);
+      if (hit.length) return hit;
+    }
+    rows = rows.filter((r) => r.text.toLowerCase().includes(q));
+  }
+  return rows;
 }

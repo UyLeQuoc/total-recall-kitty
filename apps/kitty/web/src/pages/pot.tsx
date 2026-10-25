@@ -1,18 +1,28 @@
 /**
  * The pot page (KT3, ADR-0064, in Remora's design, ADR-0066): progress, the connected wallet's own
- * status (join with one signature, or leave), Kitty's suggested auto-ok rule, members with their next
- * pull and 🧠 reason, proposals with approve, and Kitty's pulls. Every action is the member's own
- * signature; Kitty pays the gas.
+ * status (join with one signature, or leave), the member's agent (KT4, ADR-0067), Kitty's suggested
+ * auto-ok rule, members with their next pull and 🧠 reason, proposals with approve, and Kitty's pulls.
+ * Every action is the member's own signature; Kitty pays the gas.
  */
 import { useCurrentAccount } from "@mysten/dapp-kit";
-import { ArrowLeft, Brain, Coins, Plus, Users } from "lucide-react";
+import { ArrowLeft, Bot, Brain, Coins, Plus, Users } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
-import { type Member, type PotDetail, type Proposal, usePot, useSponsored } from "@/api";
+import {
+  type Delegate,
+  type Member,
+  type PotDetail,
+  type Proposal,
+  useMcpTokenActions,
+  useMcpTokens,
+  usePot,
+  useSponsored,
+} from "@/api";
 import { ConfirmAction } from "@/components/app/confirm-action";
 import { EmptyState } from "@/components/app/empty-state";
 import { Page, PageHeader, Section } from "@/components/app/page";
 import { StatTile } from "@/components/app/stat-tile";
+import { CopyButton } from "@/components/copy-button";
 import { Done, Field, MemoryChip, TxLink, TxStatus } from "@/components/kitty";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -103,6 +113,7 @@ export function PotPage() {
 
       <Overview d={d} />
       <You d={d} me={me} />
+      <YourAgent d={d} me={me} />
       <Suggestion d={d} me={me} />
       <Members d={d} me={me} />
       <Proposals d={d} me={me} />
@@ -351,10 +362,221 @@ function Members({ d, me }: { d: PotDetail; me: Member | undefined }) {
                   : "none (left)"}
             </p>
             {m.reason ? <MemoryChip memory={m.reason} /> : null}
+            <AgentLine d={d} member={m.address} />
           </Card>
         ))}
       </div>
     </Section>
+  );
+}
+
+const delegateOf = (d: PotDetail, member: string | undefined) =>
+  member ? d.delegates.find((x) => same(x.member, member)) : undefined;
+
+function AgentLine({ d, member }: { d: PotDetail; member: string }) {
+  const a = delegateOf(d, member);
+  if (!a) return null;
+  return (
+    <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+      <Bot aria-hidden className="size-4 text-primary" />
+      Agent <span className="font-mono text-xs">{short(a.agent)}</span> approves up to{" "}
+      <span className="font-medium text-foreground">{usd(a.approveCap)}</span>
+    </p>
+  );
+}
+
+const origin = () =>
+  typeof window === "undefined" ? "http://localhost:8821" : window.location.origin;
+
+/** The member's agent (KT4, ADR-0067): name it with a cap, connect it over MCP, revoke it. */
+function YourAgent({ d, me }: { d: PotDetail; me: Member | undefined }) {
+  const tx = useSponsored();
+  const [agent, setAgent] = useState("");
+  const [cap, setCap] = useState("0.10");
+  const [done, setDone] = useState<string | null>(null);
+  if (!me?.active || d.pot.closed) return null;
+  const current = delegateOf(d, me.address);
+
+  async function name(e: FormEvent) {
+    e.preventDefault();
+    const r = await tx.run({
+      action: "set_delegate",
+      potId: d.pot.id,
+      agent: agent.trim(),
+      capUsd: Number(cap),
+    });
+    if (r) {
+      setDone(r.digest);
+      setAgent("");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Bot aria-hidden className="size-5 text-primary" />
+          Your agent
+        </CardTitle>
+        <CardDescription>
+          An AI agent can propose the group's small spends and approve them for you, up to a cap.
+          The chain enforces the cap: above it, rules and closing stay yours. It signs with its own
+          key, never yours.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {current ? (
+          <CurrentAgent d={d} a={current} onRevoked={setDone} />
+        ) : (
+          <form onSubmit={name} className="flex max-w-2xl flex-col gap-4">
+            <div className="grid gap-4 sm:grid-cols-[1fr_9rem]">
+              <Field
+                label="Agent's address"
+                required
+                pattern="0x[0-9a-fA-F]{1,64}"
+                placeholder="0x…"
+                value={agent}
+                onChange={(e) => setAgent(e.target.value)}
+                hint="The Sui address of the key your agent's MCP server holds."
+              />
+              <Field
+                label="Approve up to ($)"
+                type="number"
+                inputMode="decimal"
+                min="0.01"
+                step="0.01"
+                required
+                value={cap}
+                onChange={(e) => setCap(e.target.value)}
+              />
+            </div>
+            <TxStatus step={tx.step} error={tx.error} />
+            <div>
+              <Button type="submit" disabled={tx.busy || !agent.trim()}>
+                Name this agent
+              </Button>
+            </div>
+          </form>
+        )}
+        {done ? <Done digest={done}>Done.</Done> : null}
+        <ConnectAgent potId={d.pot.id} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function CurrentAgent({
+  d,
+  a,
+  onRevoked,
+}: {
+  d: PotDetail;
+  a: Delegate;
+  onRevoked: (digest: string) => void;
+}) {
+  const tx = useSponsored();
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-accent/40 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm">
+          <span className="font-mono text-xs break-all">{a.agent}</span>
+          <span className="text-muted-foreground"> approves for you up to </span>
+          <span className="font-semibold tabular-nums">{usd(a.approveCap)}</span>
+        </p>
+        <TxLink digest={a.setDigest} label="named on Sui" />
+      </div>
+      {a.reason ? <MemoryChip memory={a.reason} label="Remembered:" /> : null}
+      <div>
+        <ConfirmAction
+          trigger={
+            <Button variant="outline" size="sm" disabled={tx.busy}>
+              Revoke agent…
+            </Button>
+          }
+          title="Revoke this agent?"
+          description="From the next block on, its proposals and approvals for you abort onchain. Your wallet signs; Kitty pays the gas."
+          confirmLabel="Revoke agent"
+          onConfirm={async () => {
+            const r = await tx.run(
+              { action: "revoke_delegate", potId: d.pot.id },
+              { throws: true },
+            );
+            if (r) onRevoked(r.digest);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ConnectAgent({ potId }: { potId: string }) {
+  const tokens = useMcpTokens(potId);
+  const actions = useMcpTokenActions(potId);
+  const [fresh, setFresh] = useState<string | null>(null);
+  const stdio = `claude mcp add kitty -e KITTY_AGENT_KEY=<the agent's key> -e KITTY_API_URL=${origin()} -- bun <repo>/apps/kitty/src/mcp/stdio.ts`;
+  const remote = (token: string) =>
+    `claude mcp add --transport http kitty-read ${origin()}/mcp --header "Authorization: Bearer ${token}"`;
+  const live = (tokens.data ?? []).filter((t) => !t.revokedAt);
+  return (
+    <div className="flex flex-col gap-3 border-t pt-4">
+      <p className="text-sm font-medium">Connect it over MCP</p>
+      <CodeLine label="Acts for you (stdio, holds the agent's key on its side)" value={stdio} />
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-muted-foreground">
+          Read-only from anywhere: a token for this pot, shown once. Your wallet signs a message;
+          nothing is sent onchain.
+        </p>
+        {fresh ? <CodeLine label="Your token (copy it now)" value={remote(fresh)} /> : null}
+        <div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={actions.busy}
+            onClick={async () => {
+              const r = await actions.create("read-only");
+              if (r) setFresh(r.token);
+            }}
+          >
+            Create a read-only token
+          </Button>
+        </div>
+        {actions.error ? <p className="text-sm text-destructive">{actions.error}</p> : null}
+        {live.length ? (
+          <ul className="flex flex-col gap-1 text-sm">
+            {live.map((t) => (
+              <li key={t.id} className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted-foreground">
+                  {t.name} · made {when(t.createdAt)} · {t.calls} calls
+                  {t.lastUsedAt ? ` · last ${when(t.lastUsedAt)}` : ""}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={actions.busy}
+                  onClick={() => actions.revoke(t.id)}
+                >
+                  Revoke
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function CodeLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <div className="flex items-start gap-2">
+        <code className="min-w-0 flex-1 rounded-md bg-muted px-3 py-2 font-mono text-xs break-all">
+          {value}
+        </code>
+        <CopyButton value={value} label={`Copy: ${label}`} size="icon-sm" />
+      </div>
+    </div>
   );
 }
 
@@ -412,6 +634,13 @@ function ProposalRow({
   const approvedByMe = p.approvals.some((a) => same(a.member, me?.address));
   const canApprove = !!me?.active && !approvedByMe && !p.executed && !d.pot.closed;
   const passes = activeApprovals + 1 >= needed;
+  const mine = delegateOf(d, me?.address);
+  // Above my agent's cap: only I can approve it (KT4, ADR-0067).
+  const needsYou =
+    canApprove && p.kind === "spend" && !!mine && BigInt(p.amount ?? 0) > BigInt(mine.approveCap);
+  const who = (a: Proposal["approvals"][number]) =>
+    a.agent ? `${nameOf(a.member)}'s agent` : nameOf(a.member);
+  const reasons = p.approvals.filter((a) => a.agent && a.reason);
   return (
     <Card className="gap-2 p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -424,6 +653,7 @@ function ProposalRow({
           ) : null}
         </div>
         <div className="flex items-center gap-2">
+          {needsYou ? <Badge variant="destructive">needs you</Badge> : null}
           {p.executed ? (
             <Badge variant="success">done</Badge>
           ) : (
@@ -435,8 +665,23 @@ function ProposalRow({
         </div>
       </div>
       <p className="text-sm text-muted-foreground">
-        Approved by {p.approvals.map((a) => nameOf(a.member)).join(", ") || "nobody yet"}
+        {p.proposerAgent ? `Proposed by ${nameOf(p.proposer)}'s agent. ` : ""}Approved by{" "}
+        {p.approvals.map(who).join(", ") || "nobody yet"}
       </p>
+      {reasons.map((a) => (
+        <p key={`${a.member}-${a.at}`} className="flex gap-1.5 text-sm">
+          <Bot aria-hidden className="mt-0.5 size-4 shrink-0 text-primary" />
+          <span className="min-w-0 [overflow-wrap:anywhere]">
+            <span className="font-medium">{who(a)}:</span>{" "}
+            <span className="text-muted-foreground">{a.reason}</span>
+          </span>
+        </p>
+      ))}
+      {needsYou && mine ? (
+        <p className="text-sm text-muted-foreground">
+          Above your agent's {usd(mine.approveCap)} cap, so only you can approve it.
+        </p>
+      ) : null}
       {canApprove ? (
         <div className="flex flex-col gap-2 pt-1">
           <div>

@@ -63,7 +63,10 @@ export interface Signer {
 
 export interface KittyChain {
   readonly client: SuiGrpcClient;
+  /** The latest package: every call targets it. */
   readonly packageId: string;
+  /** The original package: where `Pot<C>` and `KITTY` are defined, across upgrades (ADR-0067). */
+  readonly typeOrigin: string;
   readonly coinType: string;
   readonly sponsor: string;
   /**
@@ -86,11 +89,14 @@ export function createChain(o: {
   client: SuiGrpcClient;
   sponsor: Keypair;
   packageId: string;
+  /** Defaults to `packageId` (a package that was never upgraded). */
+  typeOrigin?: string;
   coinType: string;
 }): KittyChain {
   return {
     client: o.client,
     packageId: o.packageId,
+    typeOrigin: o.typeOrigin ?? o.packageId,
     coinType: o.coinType,
     sponsor: o.sponsor.toSuiAddress(),
     async run(signer, build, opts) {
@@ -220,6 +226,8 @@ export function addJoin(
     capPerWindow: bigint;
     windowMs: number;
     expiryMs: number;
+    /** Where `KITTY` is defined: the original package, after an upgrade. */
+    typeOrigin?: string;
   },
 ) {
   const typeArguments = ["0x2::allowance::RateLimit"];
@@ -230,7 +238,7 @@ export function addJoin(
   const rate = tx.moveCall({ target: "0x1::option::some", typeArguments, arguments: [limit] });
   const proposal = tx.moveCall({
     target: "0x2::allowance::propose_for_app",
-    typeArguments: [`0x2::balance::Balance<${coinType}>`, `${pkg}::pot::KITTY`],
+    typeArguments: [`0x2::balance::Balance<${coinType}>`, `${a.typeOrigin ?? pkg}::pot::KITTY`],
     arguments: [
       tx.pure.string(a.allowanceName),
       tx.pure.address(a.keeper),
@@ -355,6 +363,80 @@ export function addLeave(
   });
 }
 
+// ---------- delegates (pot version 2, KT4, ADR-0067) ----------
+
+/** Member: name `agent` to propose spends and approve them for this member, up to `approveCap`. */
+export function addSetDelegate(
+  tx: Transaction,
+  pkg: string,
+  coinType: string,
+  a: { potId: string; agent: string; approveCap: bigint },
+) {
+  tx.moveCall({
+    target: pot(pkg, "set_delegate"),
+    typeArguments: [coinType],
+    arguments: [tx.object(a.potId), tx.pure.address(a.agent), tx.pure.u64(a.approveCap)],
+  });
+}
+
+export function addRevokeDelegate(tx: Transaction, pkg: string, coinType: string, potId: string) {
+  tx.moveCall({
+    target: pot(pkg, "revoke_delegate"),
+    typeArguments: [coinType],
+    arguments: [tx.object(potId)],
+  });
+}
+
+/** The member's delegate proposes a spend for them. */
+export function addProposeAsDelegate(
+  tx: Transaction,
+  pkg: string,
+  coinType: string,
+  a: { potId: string; member: string; payee: string; amount: bigint; memo: string },
+) {
+  tx.moveCall({
+    target: pot(pkg, "propose_as_delegate"),
+    typeArguments: [coinType],
+    arguments: [
+      tx.object(a.potId),
+      tx.pure.address(a.member),
+      tx.pure.address(a.payee),
+      tx.pure.u64(a.amount),
+      tx.pure.string(a.memo),
+    ],
+  });
+}
+
+/** The member's delegate approves for them, and runs the spend when that approval reaches quorum. */
+export function addApproveAsDelegate(
+  tx: Transaction,
+  pkg: string,
+  coinType: string,
+  a: { potId: string; member: string; seq: number; execute?: boolean },
+) {
+  const args = () => [tx.object(a.potId), tx.pure.address(a.member), tx.pure.u64(a.seq)];
+  tx.moveCall({
+    target: pot(pkg, "approve_as_delegate"),
+    typeArguments: [coinType],
+    arguments: args(),
+  });
+  if (a.execute)
+    tx.moveCall({
+      target: pot(pkg, "execute_as_delegate"),
+      typeArguments: [coinType],
+      arguments: args(),
+    });
+}
+
+/** Anyone: moves a pot to the package's current version. */
+export function addMigrate(tx: Transaction, pkg: string, coinType: string, potId: string) {
+  tx.moveCall({
+    target: pot(pkg, "migrate"),
+    typeArguments: [coinType],
+    arguments: [tx.object(potId)],
+  });
+}
+
 /** `coin::redeem_funds` from the sender's address balance → `coin::send_funds` into `to`'s. */
 export function addSendUsdc(tx: Transaction, coinType: string, to: string, amount: bigint) {
   const coin = tx.moveCall({
@@ -404,6 +486,7 @@ export async function coinIds(client: SuiGrpcClient, owner: string, coinType: st
 // ---------- reading the pot ----------
 
 export interface PotState {
+  version: number;
   balance: bigint;
   totalIn: bigint;
   totalOut: bigint;
@@ -420,6 +503,7 @@ export async function readPot(client: SuiGrpcClient, potId: string): Promise<Pot
   if (!json) return null;
   const big = (v: unknown) => BigInt(String((v as { value?: unknown })?.value ?? v ?? 0));
   return {
+    version: Number(big(json.version)),
     balance: big(json.balance),
     totalIn: big(json.total_in),
     totalOut: big(json.total_out),

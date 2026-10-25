@@ -1,5 +1,5 @@
 // KT2 (ADR-0062): generates Kitty's testnet keeper key and three test members' keys into the repo's
-// `.env`, once. Values are never printed; only the addresses are.
+// `.env`, once, and the treasurer agent's key (KT4, ADR-0067). Values are never printed; only the addresses are.
 //   bun scripts/setup-testnet.ts
 import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,6 +18,10 @@ if (!has("KITTY_MEMBER_KEYS")) {
     `KITTY_MEMBER_KEYS=${[0, 1, 2].map(() => Ed25519Keypair.generate().getSecretKey()).join(",")}`,
   );
 }
+// U12 (ADR-0067): the treasurer agent's own key. The MCP server on the agent's side holds it; Kitty's
+// server never does.
+if (!has("KITTY_AGENT_KEY"))
+  lines.push(`KITTY_AGENT_KEY=${Ed25519Keypair.generate().getSecretKey()}`);
 if (lines.length)
   appendFileSync(
     envPath,
@@ -30,4 +34,6 @@ console.log("keeper", keypairFrom(value("KITTY_KEEPER_KEY"), "KITTY_KEEPER_KEY")
 for (const [i, k] of (value("KITTY_MEMBER_KEYS") ?? "").split(",").entries()) {
   console.log(`member ${i}`, keypairFrom(k, "KITTY_MEMBER_KEYS").toSuiAddress());
 }
+const agent = value("KITTY_AGENT_KEY");
+if (agent) console.log("agent", keypairFrom(agent, "KITTY_AGENT_KEY").toSuiAddress());
 console.log(lines.length ? "generated" : "already set");

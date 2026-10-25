@@ -14,7 +14,10 @@
     "db:push": "drizzle-kit push",
     "publish:testnet": "tsx scripts/publish.ts",
     "setup:testnet": "tsx scripts/setup-testnet.ts",
-    "exit": "tsx scripts/exit.ts"
+    "exit": "tsx scripts/exit.ts",
+    "mcp": "bun src/mcp/stdio.ts",
+    "treasurer": "bun --env-file=../../.env agents/treasurer/index.ts",
+    "upgrade:testnet": "tsx scripts/upgrade.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.0",

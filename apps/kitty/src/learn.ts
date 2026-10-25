@@ -109,6 +109,32 @@ export const text = {
     `LEFT member=${o.member} (${o.name}) revoked their allowance; no more pulls. ${usd(o.contributed)} they put in stays until close`,
   closed: (o: { refunded: bigint; totalIn: bigint; totalOut: bigint }) =>
     `CLOSED refunded ${usd(o.refunded)} pro rata; in ${usd(o.totalIn)}, spent ${usd(o.totalOut)}`,
+  // KT4 (ADR-0067): agents act for a member, inside a cap the chain enforces.
+  delegate: (o: { member: string; name: string; agent: string; cap: bigint }) =>
+    `DELEGATE member=${o.member} (${o.name}) named agent=${o.agent}: it may propose spends and approve them for ${o.name} up to ${usd(o.cap)} each; above that, rules and closing, ${o.name} decides`,
+  undelegate: (o: { member: string; name: string; agent: string }) =>
+    `UNDELEGATE member=${o.member} (${o.name}) revoked agent=${o.agent}; from now on its approvals for ${o.name} abort onchain`,
+  agentApproved: (o: {
+    seq: number;
+    name: string;
+    agent: string;
+    amount: bigint;
+    memo: string;
+    reason: string;
+  }) =>
+    `AGENT_APPROVED proposal=${o.seq} "${o.memo}" ${usd(o.amount)} for ${o.name} by agent=${o.agent}. Its reason: ${o.reason}`,
+  agentProposed: (o: {
+    seq: number;
+    name: string;
+    agent: string;
+    amount: bigint;
+    memo: string;
+    withinCap: boolean;
+    reason: string;
+  }) =>
+    `AGENT_PROPOSED proposal=${o.seq} "${o.memo}" ${usd(o.amount)} for ${o.name} by agent=${o.agent} (${o.withinCap ? "within its cap, so it carries the approval" : "above its cap, so it waits for the member"}). Its reason: ${o.reason}`,
+  agentRefused: (o: { seq: number; name: string; agent: string; code: string; digest: string }) =>
+    `AGENT_REFUSED proposal=${o.seq} the chain refused agent=${o.agent}'s approval for ${o.name}: ${o.code} (${o.digest.slice(0, 10)}…); it goes back to ${o.name}`,
 };
 
 export function parsePayday(t: string) {

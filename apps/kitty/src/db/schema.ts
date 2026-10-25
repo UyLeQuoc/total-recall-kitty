@@ -17,6 +17,13 @@ import {
 
 export const kitty = pgSchema("kitty");
 
+export interface Approval {
+  member: string;
+  at: string;
+  agent?: string;
+  reason?: string;
+}
+
 const money = (name: string) => bigint(name, { mode: "bigint" });
 
 export const pots = kitty.table("pots", {
@@ -89,7 +96,10 @@ export const proposals = kitty.table(
     amount: money("amount"),
     memo: text("memo"),
     proposer: text("proposer").notNull(),
-    approvals: jsonb("approvals").$type<{ member: string; at: string }[]>().notNull().default([]),
+    /** `agent`: the member's delegate approved for them (KT4, ADR-0067), with its `reason`. */
+    approvals: jsonb("approvals").$type<Approval[]>().notNull().default([]),
+    /** The delegate that proposed it for `proposer`, if an agent did. */
+    proposerAgent: text("proposer_agent"),
     executed: boolean("executed").notNull().default(false),
     digest: text("digest"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -140,4 +150,40 @@ export const memories = kitty.table(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("kitty_memories_ns").on(t.namespace, t.createdAt)],
+);
+
+/** A member's delegate agent (KT4, ADR-0067): the current one is the latest active row. */
+export const delegates = kitty.table(
+  "delegates",
+  {
+    id: text("id").primaryKey(),
+    potId: text("pot_id").notNull(),
+    member: text("member").notNull(),
+    agent: text("agent").notNull(),
+    approveCap: money("approve_cap").notNull(),
+    active: boolean("active").notNull().default(true),
+    setDigest: text("set_digest").notNull(),
+    revokeDigest: text("revoke_digest"),
+    memoryId: text("memory_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("delegates_pot").on(t.potId, t.member)],
+);
+
+/** Read-only remote MCP tokens (ADR-0067): only the SHA-256 is kept; one pot each. */
+export const mcpTokens = kitty.table(
+  "mcp_tokens",
+  {
+    id: text("id").primaryKey(),
+    potId: text("pot_id").notNull(),
+    member: text("member").notNull(),
+    name: text("name").notNull(),
+    sha256: text("sha256").notNull().unique(),
+    calls: integer("calls").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("mcp_tokens_pot").on(t.potId)],
 );

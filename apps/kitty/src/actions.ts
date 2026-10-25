@@ -7,24 +7,40 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Keypair } from "@mysten/sui/cryptography";
+import type { Transaction } from "@mysten/sui/transactions";
 import { normalizeSuiAddress } from "@mysten/sui/utils";
 import { and, asc, desc, eq } from "drizzle-orm";
 import {
   addApprove,
+  addApproveAsDelegate,
   addCreate,
   addDepositCoins,
   addExecute,
   addJoin,
   addLeave,
   addPropose,
+  addProposeAsDelegate,
+  addRevokeDelegate,
+  addSetDelegate,
   addSpendAuto,
+  ChainAbort,
   coinIds,
+  type Executed,
   type KittyChain,
   readPot,
   type Signer,
   same,
 } from "./chain.ts";
-import { type Db, members, memories, pots, proposals, spends } from "./db/index.ts";
+import {
+  type Approval,
+  type Db,
+  delegates,
+  members,
+  memories,
+  pots,
+  proposals,
+  spends,
+} from "./db/index.ts";
 import { categoryOf, type SpendNorm, suggestAutoOk, text } from "./learn.ts";
 import { type KittyMemory, ns } from "./memory.ts";
 
@@ -68,7 +84,7 @@ const keyOf = (deps: ActionDeps, address: string): Signer => {
 async function remember(
   deps: ActionDeps,
   namespace: string,
-  kind: "episode" | "decision" | "rule" | "profile",
+  kind: "episode" | "decision" | "rule" | "profile" | "source",
   t: string,
 ) {
   if (!deps.memory) return null;
@@ -135,6 +151,7 @@ export async function joinPot(
       capPerWindow: a.capPerWindow,
       windowMs: pot.windowMs,
       expiryMs: pot.deadline.getTime(),
+      typeOrigin: deps.chain.typeOrigin,
     }),
   );
   deps.ours?.add(done.digest);
@@ -409,4 +426,259 @@ export async function potView(deps: Pick<ActionDeps, "db" | "chain">, potId: str
     .orderBy(desc(proposals.seq));
   const onchain = await readPot(deps.chain.client, potId);
   return { pot, members: ms, proposals: ps, onchain };
+}
+
+// ---------- delegates: an agent acts for one member, inside a cap (KT4, ADR-0067) ----------
+
+/** Whether one more approval reaches the quorum `pot::execute` checks (active members, capped). */
+export async function reachesQuorum(deps: Pick<ActionDeps, "db">, potId: string, seq: number) {
+  const [pot] = await deps.db.select().from(pots).where(eq(pots.id, potId));
+  const [p] = await deps.db
+    .select()
+    .from(proposals)
+    .where(and(eq(proposals.potId, potId), eq(proposals.seq, seq)));
+  if (!pot || !p) throw new ActionError("not_found", "No such proposal.");
+  const active = new Set(
+    (await deps.db.select().from(members).where(eq(members.potId, potId)))
+      .filter((m) => m.active)
+      .map((m) => m.address),
+  );
+  const have = p.approvals.filter((a) => active.has(a.member)).length;
+  return have + 1 >= Math.min(pot.quorum, active.size);
+}
+
+/** The member's current delegate, if any. */
+export async function currentDelegate(deps: Pick<ActionDeps, "db">, potId: string, member: string) {
+  const [d] = await deps.db
+    .select()
+    .from(delegates)
+    .where(
+      and(
+        eq(delegates.potId, potId),
+        eq(delegates.member, normalizeSuiAddress(member)),
+        eq(delegates.active, true),
+      ),
+    )
+    .orderBy(desc(delegates.createdAt))
+    .limit(1);
+  return d ?? null;
+}
+
+async function memberOf(deps: Pick<ActionDeps, "db">, potId: string, member: string) {
+  const [m] = await deps.db
+    .select()
+    .from(members)
+    .where(and(eq(members.potId, potId), eq(members.address, normalizeSuiAddress(member))));
+  if (!m) throw new ActionError("not_member", "Not a member of this pot.");
+  return m;
+}
+
+/** The agent itself signs (its MCP server holds the key); Kitty never holds an agent's key. */
+const agentSigner = (deps: ActionDeps, agent: string): Signer => {
+  if (!deps.signer || !same(deps.signer.toSuiAddress(), agent))
+    throw new ActionError("not_signer", "Only the agent's own key can sign this.");
+  return deps.signer;
+};
+
+/** Member: names `agent` to propose spends and approve them for this member, up to `approveCap`. */
+export async function setDelegate(
+  deps: ActionDeps,
+  a: { potId: string; member: string; agent: string; approveCap: bigint },
+) {
+  const m = await memberOf(deps, a.potId, a.member);
+  const agent = normalizeSuiAddress(a.agent);
+  if (same(agent, m.address))
+    throw new ActionError("bad_request", "The agent needs its own address, not yours.");
+  const done = await deps.chain.run(keyOf(deps, m.address), (tx) =>
+    addSetDelegate(tx, deps.chain.packageId, deps.chain.coinType, {
+      potId: a.potId,
+      agent,
+      approveCap: a.approveCap,
+    }),
+  );
+  deps.ours?.add(done.digest);
+  const now = deps.now?.() ?? new Date();
+  await deps.db
+    .update(delegates)
+    .set({ active: false, revokedAt: now, revokeDigest: done.digest })
+    .where(
+      and(
+        eq(delegates.potId, a.potId),
+        eq(delegates.member, m.address),
+        eq(delegates.active, true),
+      ),
+    );
+  const memoryId = await remember(
+    deps,
+    ns.norms(a.potId),
+    "rule",
+    text.delegate({ member: m.address, name: m.name, agent, cap: a.approveCap }),
+  );
+  await deps.db.insert(delegates).values({
+    id: randomUUID(),
+    potId: a.potId,
+    member: m.address,
+    agent,
+    approveCap: a.approveCap,
+    setDigest: done.digest,
+    memoryId,
+  });
+  return { digest: done.digest, agent, approveCap: a.approveCap, memoryId };
+}
+
+/** Member: removes their delegate; from then on its calls abort onchain. */
+export async function revokeDelegate(deps: ActionDeps, potId: string, member: string) {
+  const m = await memberOf(deps, potId, member);
+  const d = await currentDelegate(deps, potId, m.address);
+  if (!d) throw new ActionError("no_delegate", "You haven't named an agent in this pot.");
+  const done = await deps.chain.run(keyOf(deps, m.address), (tx) =>
+    addRevokeDelegate(tx, deps.chain.packageId, deps.chain.coinType, potId),
+  );
+  deps.ours?.add(done.digest);
+  await deps.db
+    .update(delegates)
+    .set({ active: false, revokedAt: deps.now?.() ?? new Date(), revokeDigest: done.digest })
+    .where(eq(delegates.id, d.id));
+  await remember(
+    deps,
+    ns.norms(potId),
+    "rule",
+    text.undelegate({ member: m.address, name: m.name, agent: d.agent }),
+  );
+  return { digest: done.digest, agent: d.agent };
+}
+
+/** The member's agent proposes a spend for them. Within its cap it carries the member's approval. */
+export async function agentPropose(
+  deps: ActionDeps,
+  a: {
+    potId: string;
+    member: string;
+    agent: string;
+    payee: string;
+    amount: bigint;
+    memo: string;
+    reason: string;
+  },
+) {
+  const m = await memberOf(deps, a.potId, a.member);
+  const d = await currentDelegate(deps, a.potId, m.address);
+  const withinCap = !!d && same(d.agent, a.agent) && a.amount <= d.approveCap;
+  const done = await deps.chain.run(agentSigner(deps, a.agent), (tx) =>
+    addProposeAsDelegate(tx, deps.chain.packageId, deps.chain.coinType, {
+      potId: a.potId,
+      member: m.address,
+      payee: a.payee,
+      amount: a.amount,
+      memo: a.memo,
+    }),
+  );
+  deps.ours?.add(done.digest);
+  const [last] = await deps.db
+    .select()
+    .from(proposals)
+    .where(eq(proposals.potId, a.potId))
+    .orderBy(desc(proposals.seq))
+    .limit(1);
+  const seq = last ? last.seq + 1 : 0;
+  const agent = normalizeSuiAddress(a.agent);
+  const at = (deps.now?.() ?? new Date()).toISOString();
+  await deps.db.insert(proposals).values({
+    potId: a.potId,
+    seq,
+    kind: "spend",
+    payee: normalizeSuiAddress(a.payee),
+    amount: a.amount,
+    memo: a.memo,
+    proposer: m.address,
+    proposerAgent: agent,
+    approvals: withinCap ? [{ member: m.address, at, agent, reason: a.reason }] : [],
+    digest: done.digest,
+  });
+  const memoryId = await remember(
+    deps,
+    ns.norms(a.potId),
+    "decision",
+    text.agentProposed({
+      seq,
+      name: m.name,
+      agent,
+      amount: a.amount,
+      memo: a.memo,
+      withinCap,
+      reason: a.reason,
+    }),
+  );
+  return { seq, digest: done.digest, withinCap, memoryId };
+}
+
+/**
+ * The member's agent approves for them, and runs the spend when its approval reaches the quorum.
+ * Above its cap the chain aborts (`EOverDelegateCap`). With `send`, a refusal is sent anyway, so the
+ * chain records it with a digest; Kitty then writes what happened to memory.
+ */
+export async function agentApprove(
+  deps: ActionDeps,
+  a: { potId: string; member: string; agent: string; seq: number; reason: string },
+  send = false,
+) {
+  const m = await memberOf(deps, a.potId, a.member);
+  const agent = normalizeSuiAddress(a.agent);
+  const [p] = await deps.db
+    .select()
+    .from(proposals)
+    .where(and(eq(proposals.potId, a.potId), eq(proposals.seq, a.seq)));
+  if (!p) throw new ActionError("not_found", "No such proposal.");
+  const exec = await reachesQuorum(deps, a.potId, a.seq);
+  const build = (execute: boolean) => (tx: Transaction) =>
+    addApproveAsDelegate(tx, deps.chain.packageId, deps.chain.coinType, {
+      potId: a.potId,
+      member: m.address,
+      seq: a.seq,
+      execute,
+    });
+  let done: Executed;
+  try {
+    done = await deps.chain.run(agentSigner(deps, agent), build(exec), send ? { send: true } : {});
+  } catch (err) {
+    if (err instanceof ChainAbort && err.digest) {
+      await remember(
+        deps,
+        ns.norms(a.potId),
+        "decision",
+        text.agentRefused({
+          seq: a.seq,
+          name: m.name,
+          agent,
+          code: err.code ?? "aborted",
+          digest: err.digest,
+        }),
+      );
+    }
+    throw err;
+  }
+  deps.ours?.add(done.digest);
+  const approvals: Approval[] = [
+    ...p.approvals,
+    { member: m.address, at: (deps.now?.() ?? new Date()).toISOString(), agent, reason: a.reason },
+  ];
+  await deps.db
+    .update(proposals)
+    .set({ approvals })
+    .where(and(eq(proposals.potId, a.potId), eq(proposals.seq, a.seq)));
+  const memoryId = await remember(
+    deps,
+    ns.norms(a.potId),
+    "decision",
+    text.agentApproved({
+      seq: a.seq,
+      name: m.name,
+      agent,
+      amount: p.amount ?? 0n,
+      memo: p.memo ?? "",
+      reason: a.reason,
+    }),
+  );
+  const executed = exec ? await afterExecute(deps, a.potId, a.seq, done.digest) : null;
+  return { digest: done.digest, executed: !!executed, memoryId };
 }

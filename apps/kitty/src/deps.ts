@@ -17,6 +17,7 @@ export function wire(env: Env, log: (msg: string, data?: Record<string, unknown>
     client,
     sponsor,
     packageId: env.KITTY_PACKAGE_ID ?? DEPLOYMENTS.testnet.packageId,
+    typeOrigin: DEPLOYMENTS.testnet.originalPackageId,
     coinType: env.USDC_COIN_TYPE_TESTNET,
   });
   const keys = new Map(

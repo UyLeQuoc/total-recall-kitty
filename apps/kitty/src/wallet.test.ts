@@ -19,6 +19,7 @@ function fakeChain(o: { abort?: string; coins?: string[] } = {}) {
   const built: string[] = [];
   const chain = {
     packageId: "0x1",
+    typeOrigin: "0x1",
     coinType: USDC,
     sponsor: "0x5",
     client: {

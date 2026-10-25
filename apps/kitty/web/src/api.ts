@@ -4,10 +4,11 @@
  * `useSponsored` is the wallet flow (ADR-0064): the server builds the whole transaction, the wallet signs
  * it, and the server adds the sponsor's signature and sends it. The member never needs SUI.
  */
-import { useCurrentAccount, useSignTransaction } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignPersonalMessage, useSignTransaction } from "@mysten/dapp-kit";
 import { Transaction } from "@mysten/sui/transactions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { revokeMessage, tokenMessage } from "../../src/mcp/messages.ts";
 
 export interface Memory {
   id: string;
@@ -53,7 +54,10 @@ export interface Proposal {
   amount: string | null;
   memo: string | null;
   proposer: string;
-  approvals: { member: string; at: string }[];
+  /** The member's agent proposed it for them (KT4, ADR-0067). */
+  proposerAgent: string | null;
+  /** `agent`: the member's agent approved for them, with its one-line `reason`. */
+  approvals: { member: string; at: string; agent?: string; reason?: string }[];
   executed: boolean;
   digest: string | null;
   createdAt: string;
@@ -81,9 +85,31 @@ export interface PotDetail {
   } | null;
   totalIn: string;
   members: Member[];
+  /** Each member's current agent (KT4, ADR-0067). */
+  delegates: Delegate[];
   proposals: Proposal[];
   pulls: Pull[];
   suggestion: { category: string; cap: string; n: number; memory: Memory | null } | null;
+}
+
+export interface Delegate {
+  member: string;
+  agent: string;
+  approveCap: string;
+  setDigest: string;
+  createdAt: string;
+  reason: Memory | null;
+}
+
+export interface McpToken {
+  id: string;
+  potId: string;
+  member: string;
+  name: string;
+  calls: number;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
 }
 
 export interface StoredMemory {
@@ -189,7 +215,9 @@ export type Prepare =
     }
   | { action: "approve"; potId: string; seq: number }
   | { action: "leave"; potId: string }
-  | { action: "deposit" };
+  | { action: "deposit" }
+  | { action: "set_delegate"; potId: string; agent: string; capUsd: number }
+  | { action: "revoke_delegate"; potId: string };
 
 export type Step = "idle" | "building" | "signing" | "sending";
 
@@ -252,4 +280,68 @@ function readable(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   if (/reject|denied|cancel/i.test(text)) return "You cancelled in your wallet. Nothing was sent.";
   return text;
+}
+
+export const useMcpTokens = (potId: string) =>
+  useQuery({
+    queryKey: ["mcp-tokens", potId],
+    queryFn: () => api.get<McpToken[]>(`/api/pots/${potId}/mcp-tokens`),
+  });
+
+/**
+ * Read-only remote MCP tokens (ADR-0067): the member's wallet signs a short message, the server
+ * checks it, and the token is shown once.
+ */
+export function useMcpTokenActions(potId: string) {
+  const account = useCurrentAccount();
+  const sign = useSignPersonalMessage();
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function signed<T>(message: string, path: string, body: Record<string, unknown>) {
+    if (!account) throw new Error("Connect a wallet first.");
+    const { signature } = await sign.mutateAsync({ message: new TextEncoder().encode(message) });
+    return api.post<T>(path, { ...body, member: account.address, signature });
+  }
+
+  async function guard<T>(f: () => Promise<T>): Promise<T | null> {
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await f();
+      await qc.invalidateQueries({ queryKey: ["mcp-tokens", potId] });
+      return out;
+    } catch (err) {
+      setError(readable(err));
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return {
+    busy,
+    error,
+    create: (name: string) =>
+      guard(() => {
+        const at = new Date().toISOString();
+        const member = account?.address ?? "";
+        return signed<{ id: string; token: string }>(
+          tokenMessage({ potId, member, name, at }),
+          `/api/pots/${potId}/mcp-tokens`,
+          { name, at },
+        );
+      }),
+    revoke: (tokenId: string) =>
+      guard(() => {
+        const at = new Date().toISOString();
+        const member = account?.address ?? "";
+        return signed<{ revoked: string }>(
+          revokeMessage({ potId, tokenId, member, at }),
+          `/api/pots/${potId}/mcp-tokens/${tokenId}/revoke`,
+          { at },
+        );
+      }),
+  };
 }

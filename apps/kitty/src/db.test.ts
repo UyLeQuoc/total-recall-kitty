@@ -25,6 +25,7 @@ const balances = new Map<string, bigint>([
 const sent: string[] = [];
 const chain = {
   packageId: "0x1",
+  typeOrigin: "0x1",
   coinType: "0x2::usdc::USDC",
   sponsor: "0x5",
   client: {} as never,
