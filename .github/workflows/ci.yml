@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here touches mainnet. Tests that need Postgres or a Walrus Memory account skip themselves.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Lint and format
+        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Test
+        run: bun run test
+      - name: Build the web
+        run: bun run build
+      - name: Audit dependencies
+        run: bun pm scan
+      - name: No secrets committed
+        run: |
+          if git ls-files | grep -E '(^|/)\.env(\..+)?$' | grep -vq '\.env\.example$'; then
+            echo "::error::an .env file is tracked"; exit 1
+          fi
+          echo "clean"
+
+  move:
+    runs-on: ubuntu-latest
+    env:
+      # Allowances need >= 1.81 (sui::allowance isn't in 1.74's framework).
+      SUI_VERSION: testnet-v1.82.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Sui CLI
+        run: |
+          mkdir -p /tmp/sui-cli "$HOME/.local/bin"
+          curl -fsSL "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-ubuntu-x86_64.tgz" | tar -xz -C /tmp/sui-cli
+          install -m 0755 "$(find /tmp/sui-cli -type f -name sui | head -1)" "$HOME/.local/bin/sui"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: sui move test
+        run: (cd packages/move/kitty && sui move test)

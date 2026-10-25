@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kitty
+      POSTGRES_PASSWORD: kitty
+      POSTGRES_DB: kitty
+    ports:
+      - "5436:5432"
+    volumes:
+      - kitty_pg:/var/lib/postgresql/data
+volumes:
+  kitty_pg:

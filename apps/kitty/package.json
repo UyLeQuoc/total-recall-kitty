@@ -1,0 +1,51 @@
+{
+  "name": "@kitty/app",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "start": "tsx src/main.ts",
+    "build": "vite build --config web/vite.config.ts",
+    "test": "vitest run",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "db:push": "drizzle-kit push",
+    "publish:testnet": "tsx scripts/publish.ts",
+    "setup:testnet": "tsx scripts/setup-testnet.ts",
+    "exit": "tsx scripts/exit.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.0",
+    "@mysten/dapp-kit": "^1.1.17",
+    "@mysten/sui": "^2.33.2",
+    "@noble/hashes": "^2.0.0",
+    "@total-recall/chain": "workspace:*",
+    "@total-recall/memory": "workspace:*",
+    "@tanstack/react-query": "^5.90.0",
+    "dotenv": "^17.0.0",
+    "drizzle-orm": "^0.45.3",
+    "grammy": "^1.46.0",
+    "hono": "^4.13.13",
+    "postgres": "^3.4.9",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^7.13.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "drizzle-kit": "^0.31.11",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12"
+  }
+}

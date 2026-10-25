@@ -1,0 +1,15 @@
+# Secrets and local state
+.env
+.env.*
+!.env.example
+node_modules/
+.DS_Store
+dist/
+.turbo/
+
+# Move build output
+packages/move/**/build/
+
+# Test and e2e output
+apps/*/test-results/
+apps/*/playwright-report/

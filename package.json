@@ -1,0 +1,45 @@
+{
+  "name": "total-recall-kitty",
+  "private": true,
+  "version": "0.0.1",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "bun run --filter @kitty/app dev",
+    "dev:web": "bun run --filter @kitty/app dev:web",
+    "typecheck": "turbo run typecheck",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "biome check --error-on-warnings .",
+    "format": "biome format --write .",
+    "db:push": "bun run --filter @kitty/app db:push",
+    "e2e": "bun run --filter @kitty/app e2e",
+    "diagnose:memory": "bun run --filter @total-recall/memory diagnose"
+  },
+  "devDependencies": {
+    "@bun-security-scanner/osv": "^1.0.0",
+    "@biomejs/biome": "^2.5.14",
+    "turbo": "^2.11.2",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "esbuild": ">=0.25.0",
+    "source-map-js": ">=1.2.2",
+    "follow-redirects": ">=1.16.1",
+    "vite": ">=8.3.5",
+    "hono": ">=4.13.13",
+    "vitest": "^4.1.12",
+    "@vitest/mocker": "^4.1.12"
+  },
+  "trustedDependencies": [
+    "@biomejs/biome",
+    "@tailwindcss/oxide",
+    "esbuild"
+  ],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
