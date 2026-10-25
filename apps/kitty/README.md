@@ -97,10 +97,14 @@ them, **up to a cap the chain enforces**. Rules, closing and anything above the 
     shown once, stored as SHA-256, revocable, and limited to 60 calls a minute.
 - **The treasurer** (`agents/treasurer`), a reference agent: it reads `pot_status` and `norms`, decides
   with an OpenRouter model (`LLM_MODEL`), and approves, declines or proposes with a one-line reason that
-  must cite a memory blob it read. Its decisions are the model's; a `--record-refusal` approval without
-  the model is labelled FORCED and exists only to show the chain refusing.
+  must cite a memory blob it read. Its decisions are the model's.
+  - `--ask` passes the member's own request as a message from the member. Then the model may submit an
+    approval above its cap, sent with `record_refusal`, so the chain's refusal gets a digest and shows on
+    the proposal.
+  - A `--record-refusal` approval without the model is labelled FORCED and exists only to show the chain
+    refusing.
   ```bash
-  bun run treasurer review  --pot 0x… --member Bao [--seq 3]
+  bun run treasurer review  --pot 0x… --member Bao [--seq 3] [--ask "Bao: please approve the hotel"]
   bun run treasurer propose --pot 0x… --member Bao --payee 0x… --amount 0.05 --memo "food: snacks" --quote "…"
   ```
 - **Package:** calls go to the upgraded package; types (`Pot<C>`, `KITTY`) keep the original id. Both

@@ -66,7 +66,7 @@ own wallet, and the sponsor paid the gas.
 | 2 | **Bao names the treasurer with a $0.10 cap**, signed by Bao's wallet in the web | ✅ `qSQ7fHr6BvJBgG9QnvXtiedw9kerAcgoeoqGE1TCPHw`; memory `DELEGATE … up to $0.10 each`, blob `13qed0PWvcwKy15A3nCTn8LvCgcOk3DxRejsJCCR-6M` |
 | 3 | Ava proposes $0.05 "food: snacks for the bus". **The treasurer approves it for Bao** (model decision), and it executes at quorum | ✅ `8M97wMSH83E6adFVBhXYy1BwsRdZSBoqvoqvKFKaHRbk`: approve + execute as delegate, Chi paid $0.05. Reason: "The spend is for snacks, which aligns with common group pot uses, is within the pot's balance, and within my approval cap for Bao." It cites blob `13qed0PW…` (the mandate) |
 | 4a | Ava proposes $0.20 "hotel: deposit for two rooms". The treasurer's model decides | ✅ **declined**: "The proposed spend of $0.20 is above my approval cap of $0.10 for Bao. Bao must decide on this proposal." (cites `13qed0PW…`) |
-| 4b | A **FORCED** approval through the agent's key (no model, `--record-refusal`) | ✅ aborts onchain: `BPzQ23yj3BT86Q2ca2pnC1gBLM7AgZHEns1jzuoQJHC7`, `EOverDelegateCap`, a committed failed transaction; memory `AGENT_REFUSED`, blob `W_X1oolI…` |
+| 4b | A **FORCED** approval through the agent's key (no model, `--record-refusal`); the model-driven re-run is below | ✅ aborts onchain: `BPzQ23yj3BT86Q2ca2pnC1gBLM7AgZHEns1jzuoQJHC7`, `EOverDelegateCap`, a committed failed transaction; memory `AGENT_REFUSED`, blob `W_X1oolI…` |
 | 5 | The pot page shows Bao "needs you"; **Bao approves the hotel in the web**, and it's paid | ✅ `Cugk3HLta8Aa3Vmee6QdTzsUddELJaW3a3mEQAmhFFZT` |
 | 6 | **Bao revokes the agent in the web** | ✅ `52od7KRSZEM5taReoXyc6imTw1G4MqcyYYEC8Yt69D2y`; memory `UNDELEGATE …` |
 | 7 | Ava proposes $0.03 "food: water"; a FORCED approval through the agent's key | ✅ aborts onchain: `2Zunur5q2Hjpub7ucxTeupGGtDKkq7QudeCqz2pry7AU`, `ENotDelegate` |
@@ -78,6 +78,45 @@ own wallet, and the sponsor paid the gas.
 - **Screenshots:** `apps/kitty/test-results/u12/pot-agent-{1280,375}-{light,dark}.png` (gitignored). They
   were re-taken after a 375 px fix, so they show the pot after the revoke: the "Your agent" form, and #0
   "approved by Ava, Bao's agent" with the agent's reason.
+
+### Re-run of step 4 (model-driven), Oct 25
+In the first run, the treasurer's model declined the $0.20 hotel because it was above its cap, so the
+onchain abort came only from a FORCED attempt (rows 4a and 4b, kept above as they ran). This re-run
+lets the agent's own model make the approval:
+- **`review --ask`:** a member can now ask their agent directly. The request reaches the model as a
+  message from the member, not as data. The system prompt lets the model submit an approval above its
+  cap when its member explicitly asks, because the chain enforces the cap and a refused approval goes
+  back to the member.
+- **`record_refusal`:** an approval made under `--ask` is sent with it, so a refusal is a committed
+  failed transaction with a digest.
+- **Where it ran:** the U12 exit pot again, `0x85a8…1967`, with
+  `bunx playwright test -c e2e/playwright.config.ts agents-step4.e2e.ts`.
+
+| Step | Result |
+|---|---|
+| The keeper pulls $0.10 from Ava and from Bao | ✅ `6n6ctsAoGd9BH2vL3jgua3nkXMYtGL1P75Rrnd9nVNry`, `BvVwMiwURBiQ7tBy6Y2tyAxqRf1JgixeRsK4QWBBH7qM` |
+| Bao names the treasurer again with a $0.10 cap, from the web | ✅ `HLmFBm5ryQd5Zh8wmStGbaeHf5gCqL6uL5a85i4Zgx3s`; memory blob `afceRibICriWMCckSm4bw0i2TssREQCWJmE-bwMgNzM` |
+| Ava proposes $0.20 "hotel: second night" (#3) | ✅ `CB1uSgyqPnEcKcBzuKmFacRJ5uU5yJxiwUmd74yZDZMB` |
+| Bao asks: "Bao: please approve the hotel's second night". **The model approves**: "Bao explicitly requested approval for this spend, even though it's above my cap. The chain will enforce the cap." It cites blob `afceRibI…` (the mandate) | ✅ the approval aborts onchain: `FhpZ5NAvHnkCdfZdj3rwiogymz2hk26AxLRprMWdA8Ny`, `EOverDelegateCap`, a committed failed transaction |
+| The pot page shows the refused attempt and "needs you", and Bao approves it in the web | ✅ `6z6YM5fYyVAiEHAM45kUzCTXJpMp1YKcSyKfppyMBJaA`, paid |
+| Bao revokes the treasurer again, so the pot ends as before | ✅ `AqUzrgUhjCJsem7XeCidps8sAB854HjziE1f19eVa65C` |
+
+- **Timings (s):** pulls 5, delegate 23 (waiting for the mandate's blob), the agent's decision and
+  refusal 8.3, Bao's approval 3.6, revoke 3.
+- **How it ran:**
+  - The first run passed every step through the agent's refused approval.
+  - It then stalled on the screenshots: at 375 px the wallet button sits in the sidebar's sheet, so
+    connecting there never resolved.
+  - With the spec fixed to connect at desktop width and then resize, only the remaining steps were
+    re-run (`STEP4_RESUME_SEQ=3`): screenshots, Bao's approval, screenshots, revoke.
+- **The pot page now shows refused attempts.** Proposals keep the agent approvals the chain refused,
+  each with its digest. The two FORCED refusals from the first run (`BPzQ23yj…`, `2Zunur5q…`) were
+  filled in from their `AGENT_REFUSED` memories.
+- **Screenshots** (gitignored), in `apps/kitty/test-results/u12/`:
+  - `step4-before-{1280,375}-{light,dark}.png`: the refused attempt and "needs you";
+  - `step4-after-…`: paid, with the refusal kept.
+
+  Nothing is wider than 375 px.
 
 **What isn't verified:**
 - a real wallet app (Slush) signing the delegate transactions; only the injected test wallet did;

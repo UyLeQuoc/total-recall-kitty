@@ -17,6 +17,15 @@ import {
 
 export const kitty = pgSchema("kitty");
 
+export interface Refusal {
+  member: string;
+  agent: string;
+  code: string;
+  digest: string;
+  at: string;
+  reason?: string;
+}
+
 export interface Approval {
   member: string;
   at: string;
@@ -100,6 +109,8 @@ export const proposals = kitty.table(
     approvals: jsonb("approvals").$type<Approval[]>().notNull().default([]),
     /** The delegate that proposed it for `proposer`, if an agent did. */
     proposerAgent: text("proposer_agent"),
+    /** Agents' approvals the chain refused, each a committed failed transaction (KT4, ADR-0067). */
+    refusals: jsonb("refusals").$type<Refusal[]>().notNull().default([]),
     executed: boolean("executed").notNull().default(false),
     digest: text("digest"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

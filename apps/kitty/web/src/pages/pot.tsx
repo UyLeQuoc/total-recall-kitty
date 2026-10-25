@@ -677,6 +677,22 @@ function ProposalRow({
           </span>
         </p>
       ))}
+      {(p.refusals ?? []).map((r) => (
+        <div
+          key={r.digest}
+          className="flex flex-col gap-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm"
+        >
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <Bot aria-hidden className="size-4 shrink-0 text-destructive" />
+            <span className="font-medium">{nameOf(r.member)}'s agent tried to approve:</span>
+            <span className="text-muted-foreground">refused onchain ({r.code})</span>
+            <TxLink digest={r.digest} label="failed tx" />
+          </p>
+          {r.reason ? (
+            <p className="min-w-0 text-muted-foreground [overflow-wrap:anywhere]">{r.reason}</p>
+          ) : null}
+        </div>
+      ))}
       {needsYou && mine ? (
         <p className="text-sm text-muted-foreground">
           Above your agent's {usd(mine.approveCap)} cap, so only you can approve it.

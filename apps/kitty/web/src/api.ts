@@ -58,6 +58,15 @@ export interface Proposal {
   proposerAgent: string | null;
   /** `agent`: the member's agent approved for them, with its one-line `reason`. */
   approvals: { member: string; at: string; agent?: string; reason?: string }[];
+  /** Agents' approvals the chain refused, each with its failed transaction's digest. */
+  refusals: {
+    member: string;
+    agent: string;
+    code: string;
+    digest: string;
+    at: string;
+    reason?: string;
+  }[];
   executed: boolean;
   digest: string | null;
   createdAt: string;

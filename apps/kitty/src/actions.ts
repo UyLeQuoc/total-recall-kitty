@@ -642,6 +642,22 @@ export async function agentApprove(
     done = await deps.chain.run(agentSigner(deps, agent), build(exec), send ? { send: true } : {});
   } catch (err) {
     if (err instanceof ChainAbort && err.digest) {
+      await deps.db
+        .update(proposals)
+        .set({
+          refusals: [
+            ...p.refusals,
+            {
+              member: m.address,
+              agent,
+              code: err.code ?? "aborted",
+              digest: err.digest,
+              at: (deps.now?.() ?? new Date()).toISOString(),
+              reason: a.reason,
+            },
+          ],
+        })
+        .where(and(eq(proposals.potId, a.potId), eq(proposals.seq, a.seq)));
       await remember(
         deps,
         ns.norms(a.potId),
